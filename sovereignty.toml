@@ -1,0 +1,624 @@
+## Sovereignty Policy — machine-readable source of truth
+##
+## Companion to DEPENDENCY_LEDGER.md (the human-readable ledger, which explains
+## the reasoning). This file is what `tools/sovereignty_check.py` enforces in CI.
+## The two must not drift: `sovereignty_check.py --check-ledger` fails if any
+## name declared here is missing from the ledger prose.
+##
+## Build Map ticket #1. Bible SS1.2.
+##
+## THE TEST APPLIED TO EVERY ENTRY:
+##   "If this library vanished tomorrow, is what remains still our optimization
+##    engine?"  YES -> permitted.  NO -> forbidden.
+##
+## Three tiers, because the binary permitted/forbidden split loses real cases:
+##   permitted  - a numerical primitive. Linear algebra, plumbing, test infra.
+##   restricted - dual-use. Permitted ONLY inside declared path scopes; a hit
+##                outside those scopes is a violation. This is the tier that
+##                keeps the benchmark oracle (#2) from leaking into the core,
+##                and keeps fill-reducing ordering separate from the structure
+##                detection we must own (#14).
+##   forbidden  - an optimization solver, or an algorithm that IS one of our
+##                differentiators. Never linked, forked, or vendored.
+
+schema_version = 1
+
+[meta]
+ticket = "#1"
+gate = "M0"
+bible_ref = "SS1.2, Part VII"
+ledger = "DEPENDENCY_LEDGER.md"
+
+# ---------------------------------------------------------------------------
+# What gets scanned.
+# ---------------------------------------------------------------------------
+[scan]
+include_globs = [
+  "CMakeLists.txt",
+  "**/CMakeLists.txt",
+  "**/*.cmake",
+  "**/*.cpp", "**/*.cc", "**/*.cu", "**/*.cuh",
+  "**/*.h", "**/*.hpp", "**/*.hip",
+  "**/*.py",
+  "pyproject.toml", "requirements*.txt", "constraints*.txt",
+  "vcpkg.json", "conanfile.txt", "conanfile.py",
+  "environment.yml", "environment.yaml",
+  "Makefile", "**/Makefile", "meson.build", "**/meson.build",
+  ".gitmodules",
+  "**/*.pc",
+]
+
+# Excluded because they legitimately NAME the forbidden things: the ledger, this
+# policy, the checker, and its tests. Everything else is fair game.
+exclude_globs = [
+  ".git/**",
+  "DEPENDENCY_LEDGER.md",
+  "sovereignty.toml",
+  "tools/sovereignty_check.py",
+  "tools/test_sovereignty_check.py",
+  "Sovereign_Solver_Bible.md",
+  "Sovereign_Solver_Build_Map.md",
+  "problemStatement.md",
+  "README.md",
+  "build/**", "**/build/**",
+  "**/__pycache__/**",
+]
+
+# Directory names that mean "vendored third-party source lives here". Any
+# subdirectory of one of these whose name matches a forbidden entry is a
+# violation even if no manifest mentions it -- catches a raw source drop.
+vendor_dirs = ["third_party", "thirdparty", "extern", "external", "vendor", "deps", "subprojects"]
+
+# ===========================================================================
+# FORBIDDEN -- optimization solvers and our own differentiating algorithms.
+# ===========================================================================
+
+# --- LP / MILP solver libraries ------------------------------------------
+[[forbidden]]
+name = "cbc"
+display = "COIN-OR CBC"
+aliases = ["coin-cbc", "coinor-cbc", "cbcsolver", "pycbc"]
+category = "milp-solver"
+reason = "A branch-and-cut MILP solver. It IS the thing we are building (L4, #38). Linking it means we ship someone else's tree search."
+
+[[forbidden]]
+name = "clp"
+display = "COIN-OR Clp"
+aliases = ["coin-clp", "coinor-clp", "coinutils"]
+category = "lp-solver"
+reason = "A simplex LP solver. Directly substitutes for our L1 continuous core and the from-scratch simplex oracle (#4). CoinUtils is listed as an alias because it is Clp's substrate and carries LP model logic, not generic linear algebra."
+
+[[forbidden]]
+name = "highs"
+display = "HiGHS"
+aliases = ["libhighs", "highspy"]
+category = "lp-milp-solver"
+reason = "Dual simplex + IPM + branch-and-cut. The open-source solver the PS names as the bar to beat -- it is a benchmarking oracle (see restricted tier), never a component."
+
+[[forbidden]]
+name = "scip"
+display = "SCIP"
+aliases = ["libscip", "pyscipopt", "scipopt"]
+category = "milp-solver"
+reason = "Constraint-integer programming framework with the conflict analysis and symmetry handling we must build ourselves (#41-#45). Note: 'scipy' is NOT this and is handled in the restricted tier."
+
+[[forbidden]]
+name = "soplex"
+display = "SoPlex"
+aliases = ["libsoplex"]
+category = "lp-solver"
+reason = "SCIP's simplex engine. Same verdict as Clp."
+
+[[forbidden]]
+name = "glpk"
+display = "GLPK"
+aliases = ["libglpk", "pyglpk", "glpsol"]
+category = "lp-milp-solver"
+reason = "GNU Linear Programming Kit -- simplex, IPM, branch-and-cut. A complete substitute for our spine."
+
+[[forbidden]]
+name = "lp_solve"
+display = "lp_solve"
+aliases = ["lpsolve", "lpsolve55", "liblpsolve"]
+category = "lp-milp-solver"
+reason = "Simplex + branch-and-bound solver."
+
+[[forbidden]]
+name = "ortools"
+display = "Google OR-Tools"
+aliases = ["or-tools", "or_tools", "cp-sat", "cpsat", "libortools"]
+category = "solver-suite"
+reason = "Bundles GLOP, PDLP, and CP-SAT. PDLP in particular is the first-order LP method we are building from scratch at L1 (#8) -- linking it would hollow out the project's central bet."
+
+[[forbidden]]
+name = "glop"
+display = "GLOP"
+aliases = []
+category = "lp-solver"
+reason = "OR-Tools' simplex. Named separately because it can be vendored independently of the OR-Tools umbrella."
+
+[[forbidden]]
+name = "pdlp"
+display = "PDLP"
+aliases = []
+category = "lp-solver"
+reason = "The reference first-order LP solver. We reimplement its algorithm from the mathematical foundation at #8; we may read the papers, never the linked binary."
+
+[[forbidden]]
+name = "cuopt"
+display = "NVIDIA cuOpt"
+aliases = ["libcuopt", "cuopt-sh"]
+category = "gpu-solver"
+reason = "NVIDIA's GPU solver -- our closest architectural competitor (Bible Part VIII). Using it would make the entire GPU-native differentiation claim vacuous."
+
+# --- Commercial solvers ---------------------------------------------------
+[[forbidden]]
+name = "gurobi"
+display = "Gurobi"
+aliases = ["gurobipy", "libgurobi"]
+category = "commercial-solver"
+reason = "One of the three foreign solvers the PS exists to displace. Oracle-only, via the restricted tier, and only if licensed."
+
+[[forbidden]]
+name = "cplex"
+display = "IBM ILOG CPLEX"
+aliases = ["docplex", "libcplex", "ilog"]
+category = "commercial-solver"
+reason = "Named in the PS title as the thing we are a sovereign alternative to."
+
+[[forbidden]]
+name = "xpress"
+display = "FICO Xpress"
+aliases = ["xpressmp", "libxprs", "xprs"]
+category = "commercial-solver"
+reason = "Named in the PS. Its structural-determinism guarantee is a design target we match ourselves at #46, not one we borrow."
+
+[[forbidden]]
+name = "mosek"
+display = "MOSEK"
+aliases = ["libmosek"]
+category = "commercial-solver"
+reason = "Commercial conic/QP solver."
+
+# --- QP / conic / NLP solvers --------------------------------------------
+[[forbidden]]
+name = "osqp"
+display = "OSQP"
+aliases = ["libosqp", "osqp-eigen"]
+category = "qp-solver"
+reason = "The ADMM operator-splitting QP solver. Bible SS4.2 describes an 'OSQP-style' variant -- style, meaning the published algorithm, not the library."
+
+[[forbidden]]
+name = "ipopt"
+display = "Ipopt"
+aliases = ["libipopt", "cyipopt"]
+category = "nlp-solver"
+reason = "Interior-point NLP solver; substitutes for the future MINLP/NLP extension and for our IPM (#9)."
+
+[[forbidden]]
+name = "bonmin"
+display = "Bonmin"
+aliases = []
+category = "minlp-solver"
+reason = "MINLP branch-and-bound."
+
+[[forbidden]]
+name = "couenne"
+display = "Couenne"
+aliases = []
+category = "minlp-solver"
+reason = "Spatial branch-and-bound for nonconvex MINLP -- exactly the Bible Part XI.B roadmap we intend to own."
+
+[[forbidden]]
+name = "qpoases"
+display = "qpOASES"
+aliases = ["qpoases"]
+category = "qp-solver"
+reason = "Active-set QP solver."
+
+[[forbidden]]
+name = "clarabel"
+display = "Clarabel"
+aliases = []
+category = "conic-solver"
+reason = "Interior-point conic solver."
+
+[[forbidden]]
+name = "ecos"
+display = "ECOS"
+aliases = ["ecos-bb"]
+category = "conic-solver"
+reason = "Interior-point conic solver."
+
+[[forbidden]]
+name = "scs"
+display = "SCS"
+aliases = ["scs-python"]
+category = "conic-solver"
+reason = "Splitting conic solver -- first-order, the same family as our PDHG engine."
+
+# --- Graph automorphism (the nauty trap, Bible SS4.5.1, ticket #41) -------
+[[forbidden]]
+name = "nauty"
+display = "nauty"
+aliases = ["libnauty", "dreadnaut"]
+category = "graph-automorphism"
+reason = "Individualization-Refinement automorphism engine. Ticket #41 requires we reimplement IR from the mathematical foundation; linking nauty deletes differentiator Bet 7."
+
+[[forbidden]]
+name = "traces"
+display = "Traces"
+aliases = []
+category = "graph-automorphism"
+reason = "Ships inside the nauty distribution. Same verdict."
+
+[[forbidden]]
+name = "bliss"
+display = "bliss"
+aliases = ["libbliss"]
+category = "graph-automorphism"
+reason = "The automorphism tool SCIP links for symmetry breaking. We are explicitly differentiating against exactly that arrangement (Bible Part VIII)."
+
+[[forbidden]]
+name = "saucy"
+display = "saucy"
+aliases = []
+category = "graph-automorphism"
+reason = "Sparse-symmetry automorphism tool. Same verdict."
+
+[[forbidden]]
+name = "permlib"
+display = "PermLib"
+aliases = []
+category = "group-theory"
+reason = "Schreier-Sims / BSGS permutation group library. Ticket #42 requires we build the stabilizer chain ourselves."
+
+# --- Decomposition frameworks (Bible SS4.2A.4, ticket #25-#32) -----------
+[[forbidden]]
+name = "gcg"
+display = "GCG"
+aliases = []
+category = "decomposition-framework"
+reason = "Generic Column Generation -- automatic block detection plus Dantzig-Wolfe. Bible SS4.2A.4 marks it studied-not-linked: we read its hypergraph detection design and reimplement it GPU-parallel at #14."
+
+[[forbidden]]
+name = "dip"
+display = "COIN-OR DIP"
+aliases = ["coin-dip", "decomp"]
+category = "decomposition-framework"
+reason = "Decomposition in Integer Programming framework. Substitutes for L1.5 (#25)."
+
+[[forbidden]]
+name = "mpi-sppy"
+display = "mpi-sppy"
+aliases = ["mpisppy"]
+category = "decomposition-framework"
+reason = "Progressive Hedging / scenario decomposition. Studied for its adaptive rho initialization (#32), never linked."
+
+[[forbidden]]
+name = "pips"
+display = "PIPS-IPM++"
+aliases = ["pipsipm", "pips-ipm", "pipsnlp"]
+category = "decomposition-framework"
+reason = "Schur-complement structured IPM. Studied as validation for the cuDSS approach (Bible SS4.2A.4), never linked."
+
+[[forbidden]]
+name = "pysp"
+display = "PySP"
+aliases = []
+category = "decomposition-framework"
+reason = "Stochastic programming decomposition layer."
+
+[[forbidden]]
+name = "dsp"
+display = "DSP"
+aliases = []
+category = "decomposition-framework"
+reason = "Decomposition for structured programs (dual decomposition / Benders)."
+
+# --- Graph & hypergraph partitioners -------------------------------------
+# The subtle one. Partitioning-for-structure-detection is ticket #14, a named
+# differentiator (Bet 6). Partitioning-for-fill-reduction is linear algebra.
+# METIS straddles both, so it sits in the restricted tier below; the pure
+# hypergraph partitioners have no fill-reduction use and are forbidden outright.
+[[forbidden]]
+name = "kahypar"
+display = "KaHyPar"
+aliases = ["mt-kahypar", "mtkahypar"]
+category = "hypergraph-partitioner"
+reason = "Multi-level hypergraph partitioning -- precisely the algorithm ticket #14 must implement GPU-parallel. Linking it forfeits Bet 6."
+
+[[forbidden]]
+name = "patoh"
+display = "PaToH"
+aliases = []
+category = "hypergraph-partitioner"
+reason = "Hypergraph partitioning toolkit. Same verdict as KaHyPar."
+
+[[forbidden]]
+name = "hmetis"
+display = "hMETIS"
+aliases = []
+category = "hypergraph-partitioner"
+reason = "Hypergraph partitioner. Distinct from METIS (graph, fill-reducing) and forbidden outright: hypergraph partitioning here has only one use, and it is ours to own."
+
+# ===========================================================================
+# RESTRICTED -- dual-use. Permitted ONLY inside the declared scopes.
+# ===========================================================================
+
+[[restricted]]
+name = "metis"
+display = "METIS / ParMETIS"
+aliases = ["libmetis", "parmetis"]
+category = "graph-partitioner"
+allowed_scopes = ["src/l0/**", "cmake/**"]
+reason = "Dual-use. As a nested-dissection fill-reducing ordering for sparse factorization it is linear algebra, and permitted inside L0 only. As block-structure detection it would substitute for ticket #14 and forfeit Bet 6. The scope restriction is the line between those two uses, enforced mechanically because it cannot be enforced by intent."
+
+[[restricted]]
+name = "scipy"
+display = "SciPy"
+aliases = []
+category = "scientific-python"
+allowed_scopes = ["tools/**", "tests/**", "benchmarks/**"]
+reason = "Ships scipy.optimize.linprog (HiGHS-backed) and scipy.sparse. Permitted in the test/benchmark harness for reference data and matrix I/O; never in the solver core or bindings, and never as an answer source except as a declared oracle under the Oracle rule."
+
+[[restricted]]
+name = "numpy"
+display = "NumPy"
+aliases = []
+category = "scientific-python"
+allowed_scopes = ["tools/**", "tests/**", "benchmarks/**", "python/**"]
+reason = "Array container and linear algebra only, carrying no optimization logic. Scoped to harness and bindings so it never becomes a load-bearing runtime dependency of the C++ core."
+
+[[restricted]]
+name = "pyomo"
+display = "Pyomo"
+aliases = []
+category = "modeling-frontend"
+allowed_scopes = ["python/**", "tests/**", "benchmarks/**"]
+reason = "A modeling frontend, not a solver -- ticket #51 requires we be a drop-in backend for it. Scoped to the bindings and their tests. Caution: Pyomo can dispatch to bundled/installed forbidden solvers; the check cannot see that at build time, so the Oracle rule governs at runtime."
+
+[[restricted]]
+name = "pulp"
+display = "PuLP"
+aliases = []
+category = "modeling-frontend"
+allowed_scopes = ["python/**", "tests/**", "benchmarks/**"]
+reason = "Modeling frontend we must be a drop-in for (#51). The specific trap: the PuLP wheel VENDORS a CBC executable. Its presence in the environment is tolerated; invoking that CBC from anything but a declared oracle path violates the Oracle rule."
+
+[[restricted]]
+name = "cvxpy"
+display = "CVXPY"
+aliases = []
+category = "modeling-frontend"
+allowed_scopes = ["python/**", "tests/**", "benchmarks/**"]
+reason = "Modeling frontend (#51). Pulls conic solvers (ECOS/SCS/Clarabel) transitively -- tolerated in the harness environment, never linked into the core."
+
+[[restricted]]
+name = "oracle"
+display = "Benchmark oracle binaries (ticket #2)"
+aliases = []
+category = "test-oracle"
+allowed_scopes = ["tools/**", "tests/**", "benchmarks/**"]
+reason = "Placeholder entry naming the policy: the external solver used as a correctness oracle (#2) is reachable ONLY as a black-box CLI over MPS/LP files on disk. It is never linked, never imported, never on the solver's link line. Bible SS1.2 and Part VII."
+
+# ===========================================================================
+# PERMITTED -- numerical primitives, plumbing, test infrastructure.
+# ===========================================================================
+
+# --- Dense / sparse linear algebra ---------------------------------------
+[[permitted]]
+name = "openblas"
+display = "OpenBLAS"
+category = "blas"
+reason = "BLAS/LAPACK implementation. Pure linear algebra; remove it and our algorithms remain, only slower."
+
+[[permitted]]
+name = "blis"
+display = "BLIS"
+category = "blas"
+reason = "BLAS implementation. Same verdict as OpenBLAS."
+
+[[permitted]]
+name = "lapack"
+display = "Reference LAPACK"
+aliases = ["lapacke"]
+category = "lapack"
+reason = "Dense factorization and eigen routines. Linear algebra."
+
+[[permitted]]
+name = "mkl"
+display = "Intel oneMKL"
+aliases = ["onemkl"]
+category = "blas"
+reason = "BLAS/LAPACK/sparse primitives. Permitted as linear algebra, but note it is vendor-locked to x86 and so weakens hardware sovereignty -- prefer OpenBLAS/BLIS by default."
+
+[[permitted]]
+name = "eigen"
+display = "Eigen"
+aliases = ["eigen3"]
+category = "linear-algebra"
+reason = "Header-only dense/sparse linear algebra templates. Carries no optimization logic."
+
+[[permitted]]
+name = "suitesparse"
+display = "SuiteSparse"
+aliases = ["cholmod", "umfpack", "klu", "colamd", "camd", "ccolamd", "spqr"]
+category = "sparse-direct"
+reason = "Sparse direct factorization and fill-reducing orderings (AMD/COLAMD). This is numerical linear algebra: it factors a matrix we hand it and has no notion of an objective, a bound, or a basis. Explicitly noted so nobody later assumes it carries optimization logic."
+
+[[permitted]]
+name = "mumps"
+display = "MUMPS"
+aliases = ["libmumps"]
+category = "sparse-direct"
+reason = "Multifrontal sparse direct solver. Same verdict as SuiteSparse -- factorization only, no optimization logic. Named explicitly because it is commonly bundled WITH Ipopt; take the factorization, never the solver around it."
+
+[[permitted]]
+name = "amd"
+display = "AMD (approximate minimum degree)"
+aliases = []
+category = "ordering"
+reason = "Fill-reducing ordering used by symbolic factorization (#9). Linear algebra."
+
+# --- CUDA -----------------------------------------------------------------
+[[permitted]]
+name = "cuda"
+display = "CUDA Toolkit / runtime"
+aliases = ["cudart", "cuda-runtime", "nvcc", "cudatoolkit"]
+category = "gpu-runtime"
+reason = "Compiler and runtime for the device. Substrate, not algorithm."
+
+[[permitted]]
+name = "cublas"
+display = "cuBLAS"
+category = "gpu-blas"
+reason = "Dense BLAS on device. Bible SS1.2 names it permitted."
+
+[[permitted]]
+name = "cusparse"
+display = "cuSPARSE"
+category = "gpu-sparse"
+reason = "Sparse primitives including SpMV, the inner loop of PDHG (#8). It multiplies matrices; the primal-dual iteration around it is ours."
+
+[[permitted]]
+name = "cusolver"
+display = "cuSOLVER"
+category = "gpu-factorization"
+reason = "Dense/sparse factorization on device."
+
+[[permitted]]
+name = "cudss"
+display = "cuDSS"
+category = "gpu-factorization"
+reason = "Direct sparse solver used for the LDL^T factorization in the pivoting-free IPM (#9) and the DW restricted master (#29). Factorization only. Bible SS6.5 flags its pivot-free stability as an open risk, which is a numerical concern, not a sovereignty one."
+
+[[permitted]]
+name = "thrust"
+display = "Thrust"
+category = "gpu-parallel"
+reason = "Parallel algorithm templates -- sort, scan, reduce. Used for the Progressive Hedging consensus reduction (#32)."
+
+[[permitted]]
+name = "cub"
+display = "CUB"
+category = "gpu-parallel"
+reason = "Device-wide parallel primitives underlying Thrust."
+
+[[permitted]]
+name = "nvtx"
+display = "NVTX"
+category = "profiling"
+reason = "Profiling annotations."
+
+# --- ROCm (the hardware-sovereignty path, ticket #3) ---------------------
+[[permitted]]
+name = "rocblas"
+display = "rocBLAS"
+category = "gpu-blas"
+reason = "AMD dense BLAS. Required for the CUDA<->ROCm backend abstraction (#3) that buys hardware sovereignty."
+
+[[permitted]]
+name = "rocsparse"
+display = "rocSPARSE"
+category = "gpu-sparse"
+reason = "AMD sparse primitives."
+
+[[permitted]]
+name = "rocsolver"
+display = "rocSOLVER"
+category = "gpu-factorization"
+reason = "AMD factorization."
+
+[[permitted]]
+name = "hip"
+display = "HIP"
+aliases = ["hipblas", "hipsparse", "hipsolver", "hipcc", "rocm"]
+category = "gpu-runtime"
+reason = "AMD device runtime and portability layer."
+
+# --- Build, bindings, and test infrastructure ----------------------------
+[[permitted]]
+name = "cmake"
+display = "CMake"
+aliases = ["ctest", "ninja"]
+category = "build-system"
+reason = "Build system. No math."
+
+[[permitted]]
+name = "googletest"
+display = "GoogleTest"
+aliases = ["gtest", "gmock"]
+category = "test-framework"
+reason = "Unit test framework."
+
+[[permitted]]
+name = "catch2"
+display = "Catch2"
+category = "test-framework"
+reason = "Unit test framework."
+
+[[permitted]]
+name = "pybind11"
+display = "pybind11"
+category = "bindings"
+reason = "C++/Python binding glue for ticket #51."
+
+[[permitted]]
+name = "nanobind"
+display = "nanobind"
+category = "bindings"
+reason = "Lighter-weight binding glue; alternative to pybind11."
+
+[[permitted]]
+name = "fmt"
+display = "fmt"
+category = "utility"
+reason = "String formatting."
+
+[[permitted]]
+name = "spdlog"
+display = "spdlog"
+category = "utility"
+reason = "Logging."
+
+[[permitted]]
+name = "cli11"
+display = "CLI11"
+category = "utility"
+reason = "Command-line parsing for the CLI (#50)."
+
+[[permitted]]
+name = "openmp"
+display = "OpenMP"
+aliases = ["libgomp", "gomp"]
+category = "parallelism"
+reason = "Host-side threading. The work-stealing scheduler (#46) is ours; this is only the thread substrate."
+
+[[permitted]]
+name = "tbb"
+display = "oneTBB"
+category = "parallelism"
+reason = "Host threading primitives. Note: the Chase-Lev deques of #46 must be ours -- use TBB for threads, not for its task scheduler, or determinism becomes untestable."
+
+[[permitted]]
+name = "mpi"
+display = "MPI"
+aliases = ["openmpi", "mpich", "libmpi"]
+category = "parallelism"
+reason = "Distributed messaging substrate for the eventual multi-GPU work (Bible SS XI.C.5)."
+
+[[permitted]]
+name = "zlib"
+display = "zlib"
+aliases = ["libz"]
+category = "utility"
+reason = "Decompression for the .gz-packed benchmark instances (#2)."
+
+# ===========================================================================
+# EXCEPTIONS -- known-safe token collisions. Every entry needs a reason;
+# the checker refuses to run on an unjustified exception.
+# ===========================================================================
+
+# (none yet -- add here when a false positive is confirmed safe, e.g. an
+#  AES_CBC_MODE constant colliding with COIN-OR CBC.)

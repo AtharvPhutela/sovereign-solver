@@ -1,0 +1,43 @@
+# Sovereignty check -- Build Map ticket #1, gate M0.
+name: sovereignty
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sovereignty:
+    name: dependency sovereignty
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # a forbidden library could be hiding in one
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # tomllib needs >= 3.11
+
+      # The checker guards the project's disqualifying constraint, so it is
+      # itself tested before it is trusted. A broken checker that returns
+      # "clean" is worse than no checker at all.
+      - name: Self-test the checker
+        run: python3 tools/test_sovereignty_check.py
+
+      - name: Scan manifests, source, submodules and vendored trees
+        run: python3 tools/sovereignty_check.py --check-ledger --verbose
+
+      # Configure so CMakeCache.txt / build.ninja exist, then scan the RESOLVED
+      # dependency graph. This is the pass that catches a forbidden library
+      # arriving transitively, which no manifest would show.
+      - name: Configure
+        run: cmake -S . -B build -G Ninja
+
+      - name: Scan the resolved dependency graph
+        run: python3 tools/sovereignty_check.py --cmake-build-dir build --check-ledger --verbose
+
+      # Belt and braces: the check is also wired into the default build target,
+      # so this fails on a violation even if the explicit steps above changed.
+      - name: Build (runs the in-build sovereignty target)
+        run: cmake --build build

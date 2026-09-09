@@ -1,0 +1,25 @@
+# Build trees
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+
+# Benchmark corpora (ticket #2) -- large, fetched, never committed
+benchmarks/data/
+benchmarks/instances/
+*.mps
+*.mps.gz
+*.lp.gz
+*.sol
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
