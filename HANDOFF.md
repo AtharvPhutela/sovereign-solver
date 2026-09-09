@@ -346,20 +346,155 @@ this machine provisioned or a different one.
 
 ---
 
-## 10. Immediate next steps
+## 10. Ticket #2 — benchmark corpus + black-box oracle (commit `3178a54`)
 
-Per the Build Map, M0 needs #2 and #3 before Phase 1's simplex oracle (#4).
+### 10.1 What was built
 
-- **#2** — pull Netlib / MIPLIB 2017 (tag the symmetry + degeneracy subset
-  separately, it's the M6 evidence) / Mittelmann / MILPBench locally; stand up one
-  permissively-licensed solver as a **file-in/answer-out CLI oracle**. It must be
-  reachable *only* that way — the `oracle` restricted-tier entry already names
-  this policy. Corpus dirs are gitignored (`benchmarks/data/`, `*.mps.gz`, etc.).
-- **#3** — L0: CSR + CSC containers (VBCSR/BSR stubs), mixed-precision type
-  policy (fp64 real, fp32/fp16 flagged unused), and the backend abstraction with
-  a CUDA impl + ROCm stub. When `src/` gets real content, uncomment
-  `add_subdirectory(src)` in `CMakeLists.txt`. The sovereignty check will start
-  scanning it automatically (globs already cover `**/*.cpp`, `**/*.cu`, etc.).
+```
+benchmarks/
+  corpus.toml            manifest: sets, URLs, licences, unpack method
+  fetch_corpus.py        stdlib-only downloader + verifier
+  README.md
+  smoke/                 COMMITTED — 4 tiny hand-verified instances
+    tiny_lp.mps          optimal, obj -10/3, unique fractional optimum
+    tiny_infeasible.mps  infeasible
+    tiny_unbounded.mps   unbounded
+    tiny_degenerate.mps  optimal, obj -2, primal-degenerate (anti-cycling target for #4)
+    expected.toml        reference answers, each derived by hand (see the .mps headers)
+  data/                  gitignored — 90 Netlib LP instances fetched here
+  .tools/                gitignored — the compiled `emps` decoder + cached indexes
+tools/oracle/
+  run_oracle.py          subprocess-only solver wrapper → normalized JSON
+  install_highs.sh       builds HiGHS CLI into build-oracle/ (out of tree)
+  check_reference.py     solves real instances, checks obj vs Netlib published value
+  README.md
+cmake/Oracle.cmake       `oracle` / `corpus` / `corpus-verify` targets + CTest wiring
+tests/
+  test_oracle.py         14 tests (fake-solver parsing + real-HiGHS smoke)
+  test_corpus.py         20 tests (manifest, readme parsing, smoke set, lock verify)
+```
 
-When either lands, extend `test_sovereignty_check.py`'s `RealRepositoryTests` if
-new permitted deps (OpenBLAS, GoogleTest, …) get added to the policy.
+### 10.2 The corpus
+
+- **Netlib LP is fetched and local**: 90 of ~92 instances in
+  `benchmarks/data/netlib_lp/`, each expanded from Netlib's packed format by
+  `emps` (a ~250-line C decompressor built into `benchmarks/.tools/`; **no
+  optimization logic**, classified `permitted` in the policy).
+- **`data/netlib_lp/_reference.toml`** — published optimal objective values
+  parsed from the Netlib `readme` PROBLEM SUMMARY TABLE (MINOS 5.3, plus CPLEX
+  cross-check values where the readme records a discrepancy). This is the
+  oracle-rule *independent answer*: a citation, not a number we computed.
+- **`data/netlib_lp/_lock.toml`** — sha256 of every expanded `.mps`.
+  `fetch_corpus.py --verify` re-hashes against it (currently 90/90 intact).
+- **Known gap:** `stocfor3`, `truss` and any other shell-archive-bundled
+  instances are skipped for M0 (they need an `sh` unpack step before `emps`).
+- **Deferred sets** (`miplib2017` + isolated `miplib2017_hard`, `mittelmann`,
+  `milpbench`, `qplib`): manifest entries with URLs/licence notes exist; the
+  fetchers are stubs that print provenance. Implement per milestone
+  (MIPLIB→M5, Mittelmann→M5/M9, MILPBench→M7). The `miplib2017_hard` subset is
+  `keep_separate = true` — never merge it into MIPLIB stats; it's the M6 evidence.
+
+### 10.3 The oracle
+
+- **`run_oracle.py`** resolves a backend in this order: `--backend` / explicit
+  path → `$SOLVER_ORACLE` → `build-oracle/bin/highs` → `highs`/`cbc`/`glpsol`/
+  `scip` on PATH. It **only ever `subprocess.run`s** the binary. No solver is
+  imported. If none is found → `status: "error"`, never an in-process fallback.
+- **Normalized schema `oracle_schema = 1`** (full shape in `tools/oracle/
+  README.md`): `status` ∈ {optimal, infeasible, unbounded, infeasible_or_
+  unbounded, time_limit, iteration_limit, error}; `objective` is `null` unless
+  the solver has a point in hand; `backend.linked = false` is an asserted
+  invariant; `threads` defaults to **1** for reproducible references.
+- **HiGHS adapter specifics** (pinned `v1.11.0`): that CLI has **no `--threads`
+  or `--write_solution_style` flags** — they go through an options file that
+  `run_oracle.py` writes. `--parallel` and `--time_limit` are real flags. The
+  solution parser targets `write_solution_style = 1` (labelled columnar table:
+  `Index Status Lower Upper Primal Dual Name`), tolerating version drift by
+  skipping unparseable rows.
+- **`build-oracle/`** holds the HiGHS source + build + installed binary. It is
+  gitignored **and** in `sovereignty.toml` `exclude_globs`. Delete it and the
+  sovereignty check + every test still pass — that's the proof it's scaffolding.
+  Rebuild with `tools/oracle/install_highs.sh` or `cmake --build build --target
+  oracle`.
+- **Verified pass condition:** `check_reference.py` solved 10 Netlib instances
+  (afiro, sc50a/b, adlittle, blend, stocfor1, degen2, bandm, share2b, beaconfd)
+  and all 10 objectives matched the published reference to tolerance.
+
+### 10.4 Sovereignty-check changes in this ticket (all with regression tests)
+
+| Change | Why |
+|---|---|
+| `exclude_globs` now prunes whole subtrees (`build-oracle/**`, `benchmarks/data/**`, `benchmarks/.tools/**`) in both the file walk and the vendored-dir walk | a prefix like `build-oracle/**` must exclude the dir itself, not only its contents; `dir_is_excluded()` handles that |
+| Exceptions match by **resolved policy entry**, not raw string | an exception keyed `token = "glpk"` now also covers a hit that matched via the alias `glpsol` |
+| Scoped exceptions for `highs`/`cbc`/`glpsol`/`scip` in `tools/oracle/**` + `tests/test_oracle.py` | the oracle wrapper's job is to *name and run* those executables; the names stay hard violations everywhere else |
+| Depgraph scan strips first-party paths + CMake `DESC =`/`COMMENT =` prose before tokenizing | our own `oracle` custom target (which runs `install_highs.sh` and has a "Building HiGHS CLI" comment) was self-flagging; a real external `libscip.so` on a link line still fails (tested) |
+| Removed the placeholder restricted `oracle` token | the Oracle rule is now enforced concretely (excluded path + scoped exceptions + ledger §5.5); the fake token only false-positived on the English word "oracle" |
+| `emps` classified `permitted`; `cplex` excepted in `fetch_corpus.py` | `emps` is a format decompressor; the `cplex` hit is parsing a *citation* in the Netlib readme, not a dependency |
+
+Policy totals now: **76 dependencies — 37 forbidden, 6 restricted, 33 permitted**
+(was 7 restricted / 32 permitted before the `oracle`→removed, `emps`→added swap).
+
+### 10.5 How to test ticket #2 (see §12)
+
+`ctest --test-dir build` runs everything. Individual suites:
+`python3 tests/test_oracle.py`, `python3 tests/test_corpus.py`,
+`python3 tools/oracle/check_reference.py`.
+
+---
+
+## 11. Immediate next steps
+
+M0 still needs **#3** before Phase 1's simplex oracle (#4).
+
+- **#3** — L0 numerical substrate: CSR + CSC containers (VBCSR/BSR stubs),
+  mixed-precision type policy (fp64 real, fp32/fp16 flagged unused), and the
+  CUDA↔ROCm backend abstraction (CUDA impl + ROCm stub). When `src/` gets real
+  content, uncomment `add_subdirectory(src)` in `CMakeLists.txt`; the
+  sovereignty check picks it up automatically (globs already cover `**/*.cpp`,
+  `**/*.cu`, …). **Blocker on this machine:** no CUDA toolkit, no ROCm, no
+  BLAS/LAPACK — the abstraction layer and CSR containers can be built and
+  unit-tested CPU-only, but any GPU kernel or BLAS call needs the toolchain
+  installed first (see §9).
+- When #3 lands, add any new permitted deps (OpenBLAS, GoogleTest, cuSPARSE…)
+  to `sovereignty.toml` **and** `DEPENDENCY_LEDGER.md` in the same commit, and
+  extend `test_sovereignty_check.py`'s `RealRepositoryTests` list.
+
+---
+
+## 12. What you can test right now
+
+Everything below is green on this machine as of commit `3178a54`.
+
+```sh
+# one shot — configure, run the in-ALL sovereignty target, run every suite
+cd /home/arch_btw/Documents/SIH
+rm -rf build && cmake -S . -B build -G Ninja
+cmake --build build          # fails the build on any sovereignty violation
+ctest --test-dir build       # 4 tests: sovereignty self-test, oracle, corpus, e2e probe
+
+# the sovereignty check directly
+python3 tools/sovereignty_check.py --cmake-build-dir build --check-ledger -v
+python3 tools/sovereignty_check.py --explain kahypar          # any dependency
+python3 tools/test_sovereignty_check.py                       # 45 tests
+
+# the oracle end to end
+tools/oracle/run_oracle.py benchmarks/data/netlib_lp/afiro.mps --with-solution
+tools/oracle/check_reference.py                               # 10 instances vs published optima
+tools/oracle/check_reference.py --all                         # all 90 (slower)
+
+# the corpus
+python3 benchmarks/fetch_corpus.py --list
+python3 benchmarks/fetch_corpus.py --verify                   # 90/90 sha256 intact
+python3 tests/test_oracle.py                                  # 14 tests
+python3 tests/test_corpus.py                                  # 20 tests
+```
+
+Expected: sovereignty `OK`, `ctest` 4/4, `check_reference.py` `PASS: 10/10`,
+`--verify` `90/90 instances intact`, all Python suites `OK`.
+
+To rebuild the oracle from scratch (e.g. on another machine):
+`tools/oracle/install_highs.sh` then `python3 benchmarks/fetch_corpus.py`.
+
+**Not yet testable** (needs ticket #3 + a GPU/BLAS toolchain): anything that
+solves an LP with our *own* code. The oracle is the reference; we haven't
+written the thing it's a reference *for* yet.
