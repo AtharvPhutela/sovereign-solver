@@ -260,9 +260,7 @@ class EndToEndTests(unittest.TestCase):
         code, out = self.run_check()
         self.assertEqual(code, sc.EXIT_OK, out)
 
-    def test_vendored_source_drop_fails(self):
-        # No manifest mentions it; someone just copied the tree in.
-        (self.root / "third_party" / "bliss").mkdir(parents=True)
+    def _policy_with_bliss(self) -> None:
         body = MINIMAL_POLICY + textwrap.dedent("""
             [[forbidden]]
             name = "bliss"
@@ -271,9 +269,51 @@ class EndToEndTests(unittest.TestCase):
             reason = "ticket #41 reimplements IR"
         """)
         (self.root / "sovereignty.toml").write_text(body)
+
+    def test_vendored_source_drop_fails(self):
+        # No manifest mentions it; someone just copied the tree in.
+        (self.root / "third_party" / "bliss").mkdir(parents=True)
+        self._policy_with_bliss()
         code, out = self.run_check()
         self.assertEqual(code, sc.EXIT_VIOLATION)
         self.assertIn("vendored source", out)
+
+    def test_vendored_single_file_drop_fails(self):
+        # The narrower gap: not a whole tree, one file named after the library,
+        # dropped into a generic vendor dir, with content that never names it.
+        (self.root / "third_party").mkdir()
+        (self.root / "third_party" / "cbc_solver.cpp").write_text("int solve() { return 0; }\n")
+        code, out = self.run_check()
+        self.assertEqual(code, sc.EXIT_VIOLATION)
+        self.assertIn("vendored source", out)
+        self.assertIn("COIN-OR CBC", out)
+
+    def test_vendored_versioned_soname_file_fails(self):
+        (self.root / "extern").mkdir()
+        # os.walk gives us the filename; multi-dot stem handling must still resolve it.
+        (self.root / "extern" / "libglpk.so.40.4.0").write_text("")
+        body = MINIMAL_POLICY + textwrap.dedent("""
+            [[forbidden]]
+            name = "glpk"
+            display = "GLPK"
+            category = "lp-milp-solver"
+            reason = "complete substitute for the spine"
+        """)
+        (self.root / "sovereignty.toml").write_text(body)
+        # extern/ is a recognised vendor dir in the real policy; add it here too.
+        (self.root / "sovereignty.toml").write_text(
+            (self.root / "sovereignty.toml").read_text().replace(
+                'vendor_dirs = ["third_party"]', 'vendor_dirs = ["third_party", "extern"]'))
+        code, out = self.run_check()
+        self.assertEqual(code, sc.EXIT_VIOLATION)
+        self.assertIn("GLPK", out)
+
+    def test_vendored_benign_file_in_vendor_dir_is_fine(self):
+        (self.root / "third_party").mkdir()
+        (self.root / "third_party" / "README.md").write_text("bundled headers live here")
+        (self.root / "third_party" / "our_helper.cpp").write_text("int help() { return 1; }\n")
+        code, out = self.run_check()
+        self.assertEqual(code, sc.EXIT_OK, out)
 
     # -- the restricted tier ----------------------------------------------
 

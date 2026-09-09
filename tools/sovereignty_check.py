@@ -391,26 +391,43 @@ def scan_tree(policy: Policy, root: Path, report: Report) -> None:
 
 
 def scan_vendor_dirs(policy: Policy, root: Path, report: Report) -> None:
-    """Catch a raw source drop that no manifest mentions."""
-    for dirpath, dirnames, _ in os.walk(root):
+    """Catch a raw source drop that no manifest mentions.
+
+    Two shapes of drop: a whole tree (``third_party/highs/...``) and a single
+    file named after the library (``third_party/cbc_solver.cpp``,
+    ``extern/glpk.c``). Both are checked here by name, because a hand-copied
+    file need not contain any token that self-identifies it -- an include guard
+    or a bare function body would sail past the content scan.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
         if ".git" in dirpath.split(os.sep):
             continue
         if Path(dirpath).name not in policy.vendor_dirs:
             continue
         rel_parent = Path(dirpath).relative_to(root).as_posix()
-        for d in dirnames:
-            for cand in name_candidates(d):
+
+        def flag(display_name: str, cand: str, entry: Entry) -> None:
+            rel = f"{rel_parent}/{display_name}"
+            if excepted(policy, cand, rel):
+                return
+            report.findings.append(Finding(
+                severity="violation", entry=entry, path=rel, line_no=0, line="",
+                source="vendor",
+                detail=(f"FORBIDDEN dependency '{entry.display}' appears as vendored source "
+                        f"(named '{display_name}').\n    Why: {entry.reason}"),
+            ))
+
+        for name in (*dirnames, *filenames):
+            # For a file, also try the extension-stripped stem: cbc_solver.cpp
+            # -> {cbc_solver.cpp, cbc_solver, cbc, solver}. name_candidates
+            # already strips extensions, but Path().stem covers multi-dot cases
+            # like libglpk.so.40.
+            probes = name_candidates(name) | name_candidates(Path(name).stem)
+            for cand in probes:
                 entry = policy.lookup(cand)
                 if entry is not None and entry.tier == "forbidden":
-                    rel = f"{rel_parent}/{d}"
-                    if excepted(policy, cand, rel):
-                        continue
-                    report.findings.append(Finding(
-                        severity="violation", entry=entry, path=rel, line_no=0, line="",
-                        source="vendor",
-                        detail=(f"FORBIDDEN dependency '{entry.display}' appears as vendored source.\n"
-                                f"    Why: {entry.reason}"),
-                    ))
+                    flag(name, cand, entry)
+                    break
 
 
 def scan_cmake_build_dir(policy: Policy, build_dir: Path, report: Report) -> None:
