@@ -168,7 +168,10 @@ build — these are the boundaries that cannot be enforced by intent alone.
 | **Pyomo** | `python/**`, `tests/**`, `benchmarks/**` | A modeling frontend we must be a drop-in backend *for* (#51), not a solver. Caveat: Pyomo dispatches to whatever solvers are installed — invisible at build time, so the Oracle rule governs at runtime. |
 | **PuLP** | `python/**`, `tests/**`, `benchmarks/**` | Same role (#51). **Specific trap: the PuLP wheel vendors a CBC executable.** Its presence in the environment is tolerated; invoking that CBC from anything but a declared oracle path violates the Oracle rule. |
 | **CVXPY** | `python/**`, `tests/**`, `benchmarks/**` | Modeling frontend (#51). Pulls ECOS/SCS/Clarabel transitively — tolerated in the harness environment, never linked into the core. |
-| **Benchmark oracle binaries** | `tools/**`, `tests/**`, `benchmarks/**` | Policy placeholder for ticket #2. The oracle is reachable **only** as a black-box CLI over MPS/LP files on disk. |
+
+The benchmark oracle (ticket #2) is handled by §5.5 below rather than a
+restricted-tier row: the Oracle rule is enforced concretely (an excluded build
+path plus scoped exceptions), not by a placeholder token.
 
 ---
 
@@ -220,6 +223,30 @@ the start — retrofitting it later is a rewrite.
 | **oneTBB** | Host threading primitives. **Caveat:** use it for threads, not for its task scheduler — the Chase-Lev deques and deterministic barriers of #46 must be ours, or the determinism guarantee becomes untestable. |
 | **MPI** (OpenMPI, MPICH) | Distributed messaging for the eventual multi-GPU work (Bible §XI.C.5). |
 | **zlib** | Decompression for `.gz`-packed benchmark instances (#2). |
+| **emps** | The ~250-line standalone C program from `netlib.org/lp/data/emps.c` that expands Netlib's packed column format to MPS text. A file-format decompressor with zero optimization logic — it never sees an objective, a bound, or a basis. Built into `benchmarks/.tools/` by `fetch_corpus.py`, never into the solver. Remove it and we fetch MPS from another mirror. |
+
+### 5.5 The benchmark oracle (ticket #2)
+
+The external solver used as a correctness oracle is **HiGHS**, which is
+**forbidden as a library** (§3.1). That is not a contradiction: the ban is on
+*linking* it. Running its command-line executable as a subprocess over MPS/LP
+files on disk is the sanctioned use under the Oracle rule (§2, Bible Part VII).
+
+The boundary is enforced physically, not by intent:
+
+- `tools/oracle/install_highs.sh` builds the HiGHS CLI into `build-oracle/` — a
+  path in `.gitignore` and in `sovereignty.toml`'s `exclude_globs`, invisible to
+  both the sovereignty scan and the solver's CMake project.
+- `tools/oracle/run_oracle.py` only ever `subprocess.run`s the binary and parses
+  its output files. It never imports a solver; if it cannot spawn one it reports
+  status `error` rather than falling back to an in-process library. Its JSON
+  output carries `backend.linked = false` as an asserted invariant.
+- If `build-oracle/` were deleted, the sovereignty check and every solver test
+  still pass. That is the proof it is scaffolding, not a dependency.
+
+Any solver reachable as a file-in/answer-out CLI can be substituted via
+`SOLVER_ORACLE=/path/to/solver`; `run_oracle.py` also has adapters for `cbc` and
+(stub) `glpsol`/`scip`.
 
 ---
 

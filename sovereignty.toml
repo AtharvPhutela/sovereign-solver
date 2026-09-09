@@ -59,9 +59,21 @@ exclude_globs = [
   "Sovereign_Solver_Bible.md",
   "Sovereign_Solver_Build_Map.md",
   "problemStatement.md",
+  "HANDOFF.md",
   "README.md",
   "build/**", "**/build/**",
   "**/__pycache__/**",
+  # Out-of-tree benchmark oracle: tools/oracle/install_highs.sh builds the HiGHS
+  # CLI here. HiGHS is FORBIDDEN as a library; permitted ONLY as a black-box CLI
+  # subprocess under the Oracle rule (DEPENDENCY_LEDGER.md S4, Bible Part VII).
+  # Its source/build tree must be invisible to this scan and to the solver's
+  # CMake -- if build-oracle/ vanished, the check and every solver test still
+  # pass, which is the proof it is scaffolding and not a dependency.
+  "build-oracle/**",
+  # Downloaded benchmark corpora (ticket #2). Only benchmarks/smoke/ is
+  # committed; benchmarks/data/ and benchmarks/.tools/ are fetched artefacts.
+  "benchmarks/data/**",
+  "benchmarks/.tools/**",
 ]
 
 # Directory names that mean "vendored third-party source lives here". Any
@@ -394,13 +406,15 @@ category = "modeling-frontend"
 allowed_scopes = ["python/**", "tests/**", "benchmarks/**"]
 reason = "Modeling frontend (#51). Pulls conic solvers (ECOS/SCS/Clarabel) transitively -- tolerated in the harness environment, never linked into the core."
 
-[[restricted]]
-name = "oracle"
-display = "Benchmark oracle binaries (ticket #2)"
-aliases = []
-category = "test-oracle"
-allowed_scopes = ["tools/**", "tests/**", "benchmarks/**"]
-reason = "Placeholder entry naming the policy: the external solver used as a correctness oracle (#2) is reachable ONLY as a black-box CLI over MPS/LP files on disk. It is never linked, never imported, never on the solver's link line. Bible SS1.2 and Part VII."
+# NOTE: there is deliberately no restricted [[oracle]] entry. The Oracle rule
+# (external solver reachable only as a black-box CLI subprocess) is enforced
+# concretely, not by a placeholder token:
+#   * build-oracle/** is excluded from every scan (the HiGHS build tree);
+#   * the highs/cbc/glpsol/scip [[exceptions]] below are scoped to
+#     tools/oracle/** + tests/test_oracle.py, so those names are a violation
+#     anywhere else;
+#   * DEPENDENCY_LEDGER.md S5.5 carries the written policy.
+# A fake "oracle" token only produced false positives on the English word.
 
 # ===========================================================================
 # PERMITTED -- numerical primitives, plumbing, test infrastructure.
@@ -615,10 +629,47 @@ aliases = ["libz"]
 category = "utility"
 reason = "Decompression for the .gz-packed benchmark instances (#2)."
 
+[[permitted]]
+name = "emps"
+display = "emps (Netlib packed-LP decoder)"
+aliases = []
+category = "data-decoder"
+reason = "The ~250-line standalone C program from netlib.org/lp/data/emps.c that expands Netlib's packed column format into MPS text. It is a file-format decompressor with zero optimization logic -- it never sees an objective, a bound, or a basis; it rewrites bytes. Built into benchmarks/.tools/ (gitignored) by fetch_corpus.py, never into the solver. Passes the vanishing test trivially: remove it and we simply fetch MPS from another mirror."
+
 # ===========================================================================
 # EXCEPTIONS -- known-safe token collisions. Every entry needs a reason;
 # the checker refuses to run on an unjustified exception.
 # ===========================================================================
 
-# (none yet -- add here when a false positive is confirmed safe, e.g. an
-#  AES_CBC_MODE constant colliding with COIN-OR CBC.)
+[[exceptions]]
+token = "cplex"
+paths = ["benchmarks/fetch_corpus.py", "benchmarks/data/**"]
+reason = "The Netlib LP readme records, for a handful of instances, a reference optimal value that differs from the MINOS 5.3 value and attributes it to CPLEX. fetch_corpus.py parses that published number into the oracle reference table (field 'optimal_value_cplex'). This is reading a citation, not depending on CPLEX -- no CPLEX code, binary, or invocation is involved."
+
+# --- Oracle harness: naming solver executables to run them as subprocesses ---
+# The oracle wrapper's entire job is to shell out to an established solver over
+# files on disk (Oracle rule, DEPENDENCY_LEDGER.md S5.5). It therefore has to
+# name those executables. This is the sanctioned use -- a subprocess, never a
+# link -- so the names are excepted, but ONLY inside the oracle harness and its
+# tests. Anywhere else in the tree these remain hard violations. Note the scope
+# does NOT cover other forbidden names: adding `gurobipy` under tools/oracle/
+# would still fail the build.
+[[exceptions]]
+token = "highs"
+paths = ["tools/oracle/**", "tests/test_oracle.py", "cmake/Oracle.cmake"]
+reason = "run_oracle.py spawns the HiGHS CLI as a subprocess and parses its output files; install_highs.sh builds that CLI into the excluded build-oracle/ path. Never imported, never linked."
+
+[[exceptions]]
+token = "cbc"
+paths = ["tools/oracle/**", "tests/test_oracle.py"]
+reason = "run_oracle.py has a subprocess adapter for the CBC CLI as an alternative oracle (SOLVER_ORACLE=cbc). Subprocess only."
+
+[[exceptions]]
+token = "glpk"
+paths = ["tools/oracle/**", "tests/test_oracle.py"]
+reason = "run_oracle.py names glpsol (the GLPK CLI) as a candidate oracle executable. Subprocess only; no libglpk linkage."
+
+[[exceptions]]
+token = "scip"
+paths = ["tools/oracle/**", "tests/test_oracle.py"]
+reason = "run_oracle.py names the SCIP CLI as a candidate oracle executable. Subprocess only; no libscip linkage."

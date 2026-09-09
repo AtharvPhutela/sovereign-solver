@@ -124,6 +124,23 @@ def any_match(patterns: list[re.Pattern[str]], relpath: str) -> bool:
     return any(p.match(relpath) for p in patterns)
 
 
+def dir_is_excluded(exclude_globs: list[str], rel_dir: str) -> bool:
+    """True if a directory (and thus its whole subtree) is excluded.
+
+    A pattern like ``build-oracle/**`` is meant to exclude the directory too,
+    not only its contents, so match the prefix directly.
+    """
+    for g in exclude_globs:
+        prefix = g[:-3] if g.endswith("/**") else g
+        prefix = prefix.rstrip("/")
+        if "*" in prefix or "?" in prefix:
+            if glob_to_regex(g).match(rel_dir):
+                return True
+        elif rel_dir == prefix or rel_dir.startswith(prefix + "/"):
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------
 # Policy
 # --------------------------------------------------------------------------
@@ -149,6 +166,7 @@ class Policy:
     ordered: list[Entry]
     include: list[re.Pattern[str]]
     exclude: list[re.Pattern[str]]
+    exclude_globs: list[str]                  # raw, for directory-prefix matching
     vendor_dirs: set[str]
     exceptions: list[dict]
     ledger_path: str
@@ -226,6 +244,7 @@ def load_policy(path: Path) -> Policy:
         ordered=ordered,
         include=[glob_to_regex(g) for g in scan.get("include_globs", [])],
         exclude=[glob_to_regex(g) for g in scan.get("exclude_globs", [])],
+        exclude_globs=list(scan.get("exclude_globs", [])),
         vendor_dirs=set(scan.get("vendor_dirs", [])),
         exceptions=exceptions,
         ledger_path=str(raw.get("meta", {}).get("ledger", "DEPENDENCY_LEDGER.md")),
@@ -274,8 +293,20 @@ class Report:
 # --------------------------------------------------------------------------
 
 def excepted(policy: Policy, token: str, relpath: str) -> dict | None:
+    """An exception matches if its token names the same thing the finding did.
+
+    Comparison is by resolved policy entry, not raw string, so an exception
+    keyed on the canonical name ("glpk") covers a hit on any of its aliases
+    ("glpsol"), and vice versa. A token that resolves to no entry falls back to
+    a plain case-insensitive match (covers collisions like AES_CBC_MODE).
+    """
+    tok = token.lower()
+    hit_entry = policy.lookup(tok)
     for exc in policy.exceptions:
-        if str(exc.get("token", "")).lower() != token.lower():
+        etok = str(exc.get("token", "")).lower()
+        exc_entry = policy.lookup(etok)
+        same = (etok == tok) or (hit_entry is not None and exc_entry is hit_entry)
+        if not same:
             continue
         paths = exc.get("paths")
         if not paths or any_match([glob_to_regex(p) for p in paths], relpath):
@@ -286,6 +317,12 @@ def excepted(policy: Policy, token: str, relpath: str) -> dict | None:
 def iter_scan_files(root: Path, policy: Policy):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in {".git", "__pycache__", ".mypy_cache"}]
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        # Prune whole excluded subtrees so os.walk never descends a large
+        # downloaded corpus or the out-of-tree oracle build.
+        if rel_dir != "." and dir_is_excluded(policy.exclude_globs, rel_dir):
+            dirnames[:] = []
+            continue
         for fn in filenames:
             full = Path(dirpath) / fn
             rel = full.relative_to(root).as_posix()
@@ -402,9 +439,16 @@ def scan_vendor_dirs(policy: Policy, root: Path, report: Report) -> None:
     for dirpath, dirnames, filenames in os.walk(root):
         if ".git" in dirpath.split(os.sep):
             continue
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        # Honour exclude_globs here too: an out-of-tree oracle build
+        # (build-oracle/) or a downloaded corpus may itself contain a vendored
+        # third_party/ dir that is not this project's concern.
+        if rel_dir != "." and dir_is_excluded(policy.exclude_globs, rel_dir):
+            dirnames[:] = []
+            continue
         if Path(dirpath).name not in policy.vendor_dirs:
             continue
-        rel_parent = Path(dirpath).relative_to(root).as_posix()
+        rel_parent = rel_dir
 
         def flag(display_name: str, cand: str, entry: Entry) -> None:
             rel = f"{rel_parent}/{display_name}"
@@ -430,17 +474,26 @@ def scan_vendor_dirs(policy: Policy, root: Path, report: Report) -> None:
                     break
 
 
-def scan_cmake_build_dir(policy: Policy, build_dir: Path, report: Report) -> None:
+def scan_cmake_build_dir(policy: Policy, build_dir: Path, report: Report,
+                         repo_root: Path | None = None) -> None:
     """Scan the *resolved* dependency graph, not just declared intent.
 
     A manifest can be clean while a transitively-pulled target puts a forbidden
     library on the link line. CMakeCache.txt records what was actually found;
     link.txt / build.ninja record what is actually linked.
+
+    First-party paths (references to this repo's own tree) are stripped before
+    tokenizing: they are already covered by the direct source scan, and they
+    would otherwise re-flag things like a custom target that shells out to
+    tools/oracle/install_highs.sh. What is left is exactly the external
+    references the dependency-graph pass exists to inspect.
     """
     targets = ["CMakeCache.txt", "build.ninja", "rules.ninja"]
     files: list[Path] = [build_dir / t for t in targets]
     files += list(build_dir.rglob("link.txt"))
     files += list(build_dir.rglob("*.cmake"))
+
+    root_str = str(repo_root.resolve()) if repo_root else None
 
     for f in files:
         if not f.is_file():
@@ -452,8 +505,45 @@ def scan_cmake_build_dir(policy: Policy, build_dir: Path, report: Report) -> Non
             continue
         if f.name == "CMakeCache.txt":
             text = strip_cmake_private_cache(text)
+        if root_str:
+            text = _strip_first_party_from_depgraph(text, root_str, repo_root)
         report.files_scanned += 1
         scan_text(policy, f"<depgraph>/{rel}", text, report, source="depgraph")
+
+
+def _strip_first_party_from_depgraph(text: str, root_str: str, repo_root: Path | None) -> str:
+    """Remove this repo's own references from generated build files.
+
+    The dependency-graph pass exists to catch an *external* forbidden library
+    reaching the link line. A generated build file also restates our own build
+    recipes -- a custom target that runs tools/oracle/install_highs.sh, a
+    COMMENT string that says "HiGHS" -- and those are already covered by the
+    direct source scan. Left in, they produce findings against our own
+    first-party paths.
+
+    So: drop absolute paths into the repo, drop pure-prose description lines,
+    and blank any remaining token that names an existing first-party file.
+    """
+    out_lines = []
+    for line in text.splitlines():
+        stripped = line.replace(root_str + "/", " ").replace(root_str, " ")
+        lead = stripped.lstrip()
+        # CMake/Ninja human-readable metadata -- not dependency resolution.
+        if lead.startswith(("DESC =", "COMMENT =", "description = ", "#")):
+            out_lines.append("")
+            continue
+        if repo_root is not None:
+            kept = []
+            for tok in stripped.split(" "):
+                cand = tok.strip().strip('"\'')
+                if cand and "/" in cand and not cand.startswith("/"):
+                    p = repo_root / cand
+                    if p.exists() and p.is_file():
+                        continue  # our own file, already scanned directly
+                kept.append(tok)
+            stripped = " ".join(kept)
+        out_lines.append(stripped)
+    return "\n".join(out_lines)
 
 
 def check_ledger(policy: Policy, root: Path, report: Report) -> None:
@@ -557,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmake_build_dir:
         bd = args.cmake_build_dir if args.cmake_build_dir.is_absolute() else root / args.cmake_build_dir
         if bd.is_dir():
-            scan_cmake_build_dir(policy, bd.resolve(), report)
+            scan_cmake_build_dir(policy, bd.resolve(), report, repo_root=root)
         elif args.verbose:
             print(f"note: build dir {bd} does not exist yet; skipping dependency-graph scan")
 

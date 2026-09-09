@@ -30,6 +30,11 @@ endif()
 # the project's disqualifying condition, so it gates everything below it.
 include(Sovereignty)
 
+# Ticket #2 -- benchmark corpus + black-box oracle. Adds `oracle`, `corpus`,
+# `corpus-verify` targets and registers the ticket #2 test suites with CTest.
+# Links nothing.
+include(Oracle)
+
 # --- placeholders for the phases that follow --------------------------------
 # add_subdirectory(src)      # ticket #3 onward -- L0 numerical substrate
 # add_subdirectory(tests)    # ticket #4 onward -- against the oracle

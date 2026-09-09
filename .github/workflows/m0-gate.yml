@@ -1,5 +1,5 @@
-# Sovereignty check -- Build Map ticket #1, gate M0.
-name: sovereignty
+# M0-gate CI: sovereignty check (ticket #1) + corpus/oracle suites (ticket #2).
+name: m0-gate
 
 on:
   push:
@@ -41,3 +41,8 @@ jobs:
       # so this fails on a violation even if the explicit steps above changed.
       - name: Build (runs the in-build sovereignty target)
         run: cmake --build build
+
+      # Ticket #2: manifest + oracle-wrapper suites (network-free; the real
+      # solver / corpus parts skip cleanly when absent).
+      - name: Ticket #2 test suites
+        run: ctest --test-dir build --output-on-failure

@@ -4,13 +4,14 @@ build-*/
 cmake-build-*/
 compile_commands.json
 
-# Benchmark corpora (ticket #2) -- large, fetched, never committed
+# Out-of-tree benchmark oracle (tools/oracle/install_highs.sh builds HiGHS here).
+# Kept entirely outside version control and outside the sovereignty-scanned tree
+# -- see DEPENDENCY_LEDGER.md and sovereignty.toml exclude_globs.
+build-oracle/
+
+# Downloaded benchmark corpora (ticket #2). Only benchmarks/smoke/ is committed.
 benchmarks/data/
-benchmarks/instances/
-*.mps
-*.mps.gz
-*.lp.gz
-*.sol
+benchmarks/.tools/
 
 # Python
 __pycache__/
@@ -23,3 +24,9 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# Oracle scratch
+*.sol
+
+# HiGHS CLI writes this in its CWD
+HiGHS.log

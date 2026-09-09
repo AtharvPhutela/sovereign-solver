@@ -1,0 +1,129 @@
+# Benchmark corpus manifest -- Build Map ticket #2, gate M0.
+#
+# Declares every standard test set, where it comes from, its licence, and how to
+# unpack it. `fetch_corpus.py` reads this; nothing here is fetched implicitly.
+#
+# Only `netlib_lp` is pulled by a bare `fetch_corpus.py` run. The MILP sets are
+# large (MIPLIB 2017 alone is ~1 GB unpacked) and are gated behind an explicit
+# `--set` so a routine checkout stays small. `make corpus` pulls everything.
+#
+# Downloaded data lands in benchmarks/data/<set>/ which is gitignored. The only
+# instances in version control are benchmarks/smoke/ -- four hand-verified tiny
+# models with reference answers in smoke/expected.toml, so CI and the first
+# solver (#4) have something to check against with no network and no solver.
+
+schema_version = 1
+
+[meta]
+ticket = "#2"
+gate = "M0"
+data_dir = "data"                       # relative to benchmarks/
+tools_dir = ".tools"                     # scratch for the emps decoder etc. (gitignored)
+
+# ---------------------------------------------------------------------------
+# Netlib LP -- the standard continuous-LP benchmark. Fetched by default.
+# ---------------------------------------------------------------------------
+[sets.netlib_lp]
+description = "Netlib LP test set (~98 instances). The classical LP benchmark; several instances are deliberately degenerate or ill-conditioned."
+homepage = "https://www.netlib.org/lp/"
+licence = "Public domain / freely distributable (U.S. government and academic contributions; Netlib places no restriction on redistribution)."
+default = true
+dest = "netlib_lp"
+
+# Netlib stores each problem in a packed column format that must be expanded to
+# MPS by `emps`, a ~250-line standalone C decompressor (netlib.org/lp/data/emps.c).
+# emps carries NO optimization logic -- it is a file-format expander -- and is
+# classified accordingly in sovereignty.toml. It is built into benchmarks/.tools/
+# (gitignored), never into the solver.
+packed_format = "netlib-packed"
+decoder_source = "https://www.netlib.org/lp/data/emps.c"
+base_url = "https://www.netlib.org/lp/data/"
+
+# The authoritative instance list and the reference optimal objective values are
+# parsed from the "PROBLEM SUMMARY TABLE" in this file (MINOS 5.3 values, plus a
+# later CPLEX-differs table which we also capture). fetch_corpus.py writes the
+# parsed result to data/netlib_lp/_reference.toml.
+index_url = "https://www.netlib.org/lp/data/readme"
+
+# Files in the data/ directory that are NOT packed LP instances.
+index_exclude = [
+  "emps.c", "emps.f", "emps.exe.gz", "readme", "changes", "ascii",
+  "minos", "minos.spc", "mpc.src", "kennington", "index.html",
+]
+
+# The Kennington problems live in a subdirectory and are packed the same way.
+# Off by default (some are large); enable with --include-kennington.
+kennington_url = "https://www.netlib.org/lp/data/kennington/"
+include_kennington = false
+
+# ---------------------------------------------------------------------------
+# MIPLIB 2017 -- the MILP benchmark. Deferred (large).
+# ---------------------------------------------------------------------------
+[sets.miplib2017]
+description = "MIPLIB 2017 -- benchmark set (240 instances) and, optionally, the full collection (1065)."
+homepage = "https://miplib.zib.de/"
+licence = "Per-instance; the collection is distributed for research use. See https://miplib.zib.de/ for terms. Record the per-instance licence tag when present."
+default = false
+deferred = true
+dest = "miplib2017"
+format = "mps.gz"
+benchmark_archive = "https://miplib.zib.de/downloads/benchmark.zip"
+collection_archive = "https://miplib.zib.de/downloads/collection.zip"
+solutions_url = "https://miplib.zib.de/downloads/solutions.zip"
+# The instance metadata CSV carries the tags we filter on below.
+metadata_csv = "https://miplib.zib.de/downloads/miplib2017-v29.solu"  # objective values
+instances_csv = "https://miplib.zib.de/tag_all.csv"
+
+# ---------------------------------------------------------------------------
+# MIPLIB 2017 hard subset -- kept ISOLATED per ticket #2: this is the direct
+# evidence for the M6 symmetry/conflict node-count claim, so it must never be
+# blended into the general MIPLIB pool in reporting.
+# ---------------------------------------------------------------------------
+[sets.miplib2017_hard]
+description = "MIPLIB 2017 instances tagged for the properties the PS names as the grading bar: high symmetry, numerical difficulty, degeneracy. Isolated for M6 evidence."
+parent = "miplib2017"
+default = false
+deferred = true
+dest = "miplib2017_hard"
+# fetch_corpus.py selects instances whose MIPLIB tag set intersects any of these.
+tags_any = ["symmetry", "numerics", "degeneracy", "infeasible", "no_solution"]
+keep_separate = true                     # never merge into miplib2017 for stats
+
+# ---------------------------------------------------------------------------
+# Mittelmann benchmarks -- curated LP/MILP/QP performance sets. Deferred.
+# ---------------------------------------------------------------------------
+[sets.mittelmann]
+description = "Hans Mittelmann's benchmark instance sets (LP, MILP, and QP tracks)."
+homepage = "https://plato.asu.edu/bench.html"
+licence = "Collected from public sources; per-instance provenance varies. Record per instance."
+default = false
+deferred = true
+dest = "mittelmann"
+# Mittelmann publishes instance lists per track rather than a single archive;
+# fetch_corpus.py resolves these when the set is requested.
+tracks = ["lp", "milp", "qplib"]
+
+# ---------------------------------------------------------------------------
+# MILPBench -- large-scale learning/scaling corpus (100k instances / 60 classes).
+# Deferred, and huge; intended for the L5 RL work (Stage 8), not M0-M5.
+# ---------------------------------------------------------------------------
+[sets.milpbench]
+description = "MILPBench -- 100k generated MILP instances across 60 structural classes, for RL training and asymptotic scaling studies."
+homepage = "https://github.com/Thinklab-SJTU/MILPBench"
+licence = "See upstream repository."
+default = false
+deferred = true
+dest = "milpbench"
+note = "Multi-hundred-GB at full size. fetch_corpus.py pulls only named classes via --class."
+
+# ---------------------------------------------------------------------------
+# QPLIB -- quadratic programming instances, for the QP path.
+# ---------------------------------------------------------------------------
+[sets.qplib]
+description = "QPLIB -- a library of quadratic programming instances."
+homepage = "https://qplib.zib.de/"
+licence = "Distributed for research use; see https://qplib.zib.de/."
+default = false
+deferred = true
+dest = "qplib"
+archive = "https://qplib.zib.de/qplib.zip"

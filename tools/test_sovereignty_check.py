@@ -347,6 +347,48 @@ class EndToEndTests(unittest.TestCase):
         code, out = self.run_check()
         self.assertEqual(code, sc.EXIT_OK, out)  # ...quiet once justified
 
+    def test_exception_keyed_on_canonical_name_covers_an_alias_hit(self):
+        # Regression: an exception `token = "glpk"` must also suppress a hit that
+        # matched via the alias "glpsol" (the GLPK CLI). Before the fix, only a
+        # literal token match worked and the oracle wrapper's glpsol references
+        # stayed red.
+        body = MINIMAL_POLICY + textwrap.dedent("""
+            [[forbidden]]
+            name = "glpk"
+            display = "GLPK"
+            aliases = ["glpsol", "libglpk"]
+            category = "lp-milp-solver"
+            reason = "complete substitute for the spine"
+
+            [[exceptions]]
+            token = "glpk"
+            paths = ["tools/oracle/**"]
+            reason = "oracle wrapper names the glpsol CLI to run it as a subprocess"
+        """)
+        (self.root / "sovereignty.toml").write_text(body)
+        self.write("tools/oracle/run_oracle.py", 'CANDIDATES = ["glpsol"]\n')
+        code, out = self.run_check()
+        self.assertEqual(code, sc.EXIT_OK, out)
+        # ...but still red outside the scope
+        self.write("src/core.cpp", "int x = glpsol_call();\n")
+        code, _ = self.run_check()
+        self.assertEqual(code, sc.EXIT_VIOLATION)
+
+    def test_excluded_directory_subtree_is_pruned(self):
+        # build-oracle/ holds the out-of-tree HiGHS build; the scan must not
+        # descend it even though it is full of "highs" references and its own
+        # vendored third_party/ dirs.
+        body = MINIMAL_POLICY.replace(
+            'exclude_globs = [".git/**"]',
+            'exclude_globs = [".git/**", "build-oracle/**"]')
+        (self.root / "sovereignty.toml").write_text(body)
+        oracle = self.root / "build-oracle" / "highs-src" / "src"
+        oracle.mkdir(parents=True)
+        (oracle / "Highs.cpp").write_text('#include "scip/scip.h"\n')  # would be a hit if scanned
+        (self.root / "build-oracle" / "third_party" / "bliss").mkdir(parents=True)
+        code, out = self.run_check()
+        self.assertEqual(code, sc.EXIT_OK, out)
+
     def test_exception_is_path_scoped(self):
         body = MINIMAL_POLICY + textwrap.dedent("""
             [[exceptions]]
@@ -402,6 +444,35 @@ class EndToEndTests(unittest.TestCase):
         self.write("CMakeLists.txt", "project(solver)\n")
         code, _ = self.run_check("--cmake-build-dir", "nonexistent")
         self.assertEqual(code, sc.EXIT_OK)
+
+    def test_depgraph_ignores_our_own_build_recipes(self):
+        # Regression: a custom target that shells out to
+        # tools/oracle/install_highs.sh, plus its "Building HiGHS CLI" COMMENT,
+        # both land in build.ninja and were flagged as a HiGHS dependency. They
+        # are our own first-party recipe, already covered by the source scan.
+        self.write("CMakeLists.txt", "project(solver)\n")
+        self.write("tools/oracle/install_highs.sh", "#!/bin/sh\necho build the oracle\n")
+        bd = self.root / "build"
+        bd.mkdir()
+        (bd / "build.ninja").write_text(
+            "build CMakeFiles/oracle: CUSTOM_COMMAND\n"
+            f"  COMMAND = cd {self.root}/build && sh {self.root}/tools/oracle/install_highs.sh\n"
+            "  DESC = Building HiGHS CLI as a black-box oracle\n")
+        code, out = self.run_check("--cmake-build-dir", "build")
+        self.assertEqual(code, sc.EXIT_OK, out)
+
+    def test_depgraph_still_catches_a_real_external_link(self):
+        # The first-party stripping must not weaken the real purpose: an
+        # absolute path to an external forbidden library still fails.
+        self.write("CMakeLists.txt", "project(solver)\n")
+        bd = self.root / "build"
+        bd.mkdir()
+        (bd / "build.ninja").write_text(
+            "build solver: CXX_EXECUTABLE_LINKER\n"
+            "  LINK_LIBRARIES = /usr/lib/x86_64-linux-gnu/libscip.so\n")
+        code, out = self.run_check("--cmake-build-dir", "build")
+        self.assertEqual(code, sc.EXIT_VIOLATION, out)
+        self.assertIn("SCIP", out)
 
     # -- ledger drift ------------------------------------------------------
 

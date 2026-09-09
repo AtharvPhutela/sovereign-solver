@@ -1,0 +1,40 @@
+# Hand-verified reference answers for the committed smoke instances.
+#
+# These exist so the very first solver we write (#4) has something to be checked
+# against before any external oracle is installed, and so CI has a network-free,
+# solver-free integrity check. Every value here was derived by hand from the
+# model in the corresponding .mps file -- the derivation is in each file's
+# comment header.
+#
+# Consumed by tests/test_corpus.py and, later, by the oracle/solver test rigs.
+
+schema_version = 1
+
+[tiny_lp]
+file = "tiny_lp.mps"
+status = "optimal"
+objective = -3.3333333333333335   # -10/3
+objective_tol = 1e-6
+# unique optimum
+solution = { X = 2.6666666666666665, Y = 0.6666666666666666 }
+tags = ["lp", "feasible", "unique-optimum"]
+
+[tiny_infeasible]
+file = "tiny_infeasible.mps"
+status = "infeasible"
+tags = ["lp", "infeasible"]
+
+[tiny_unbounded]
+file = "tiny_unbounded.mps"
+status = "unbounded"
+tags = ["lp", "unbounded"]
+
+[tiny_degenerate]
+file = "tiny_degenerate.mps"
+status = "optimal"
+objective = -2.0
+objective_tol = 1e-6
+# optimum vertex is unique, but it is primal-degenerate (3 active constraints,
+# 2 variables) so the optimal basis is not
+solution = { X = 1.0, Y = 1.0 }
+tags = ["lp", "feasible", "degenerate"]
