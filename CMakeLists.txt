@@ -26,6 +26,20 @@ if(PROJECT_IS_TOP_LEVEL)
   include(CTest)
 endif()
 
+# --- L0 build policy (ticket #3) --------------------------------------------
+# int32 indices by default: they halve the bandwidth of the index arrays in a
+# memory-bound SpMV and are what cuSPARSE wants natively. Industrial instances
+# can exceed 2^31 nonzeros, so the width is a switch rather than an assumption.
+option(SOVEREIGN_INDEX64 "Use 64-bit indices (for instances beyond 2^31 nonzeros)" OFF)
+
+# GPU backends are compiled only when their toolkit is actually found. AUTO
+# detects; ON demands and fails the configure if absent; OFF forces them out.
+set(SOVEREIGN_CUDA "AUTO" CACHE STRING "CUDA backend: AUTO, ON, or OFF")
+set(SOVEREIGN_HIP  "AUTO" CACHE STRING "ROCm/HIP backend: AUTO, ON, or OFF")
+set_property(CACHE SOVEREIGN_CUDA PROPERTY STRINGS AUTO ON OFF)
+set_property(CACHE SOVEREIGN_HIP PROPERTY STRINGS AUTO ON OFF)
+include(DetectAccelerators)
+
 # Ticket #1. Included early and unconditionally: the sovereignty constraint is
 # the project's disqualifying condition, so it gates everything below it.
 include(Sovereignty)
@@ -35,9 +49,18 @@ include(Sovereignty)
 # Links nothing.
 include(Oracle)
 
+# Ticket #3 -- L0 numerical substrate: sparse containers, numeric policy, and
+# the CUDA/ROCm backend abstraction.
+add_subdirectory(src)
+
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
+
 # --- placeholders for the phases that follow --------------------------------
-# add_subdirectory(src)      # ticket #3 onward -- L0 numerical substrate
-# add_subdirectory(tests)    # ticket #4 onward -- against the oracle
+# ticket #4  -- from-scratch CPU revised simplex (the correctness oracle)
+# ticket #5  -- MPS / LP parser
+# ticket #6  -- Ruiz + Pock-Chambolle preconditioning
 
 message(STATUS "sovereign_solver ${PROJECT_VERSION} configured "
-               "(Phase 0: scaffolding only, no solver sources yet)")
+               "(Phase 0 complete: L0 substrate + corpus + oracle)")

@@ -46,6 +46,10 @@ include_globs = [
   "Makefile", "**/Makefile", "meson.build", "**/meson.build",
   ".gitmodules",
   "**/*.pc",
+  # Shell scripts are scanned too. A build or setup script is exactly where a
+  # forbidden dependency enters unnoticed -- `git clone`, `apt install`, a
+  # downloaded tarball -- and none of that appears in a CMake manifest.
+  "**/*.sh", "**/*.bash",
 ]
 
 # Excluded because they legitimately NAME the forbidden things: the ledger, this
@@ -671,5 +675,16 @@ reason = "run_oracle.py names glpsol (the GLPK CLI) as a candidate oracle execut
 
 [[exceptions]]
 token = "scip"
-paths = ["tools/oracle/**", "tests/test_oracle.py"]
-reason = "run_oracle.py names the SCIP CLI as a candidate oracle executable. Subprocess only; no libscip linkage."
+paths = ["tools/oracle/**", "tests/test_oracle.py", "tools/verify_phase0.sh"]
+reason = "run_oracle.py names the SCIP CLI as a candidate oracle executable. Subprocess only; no libscip linkage. verify_phase0.sh writes 'find_package(SCIP)' into a throwaway temp directory to prove this checker actually fails closed -- the negative half of ticket #1's pass condition."
+
+# --- Phase 0 gate script: plants violations on purpose ----------------------
+[[exceptions]]
+token = "cbc"
+paths = ["tools/verify_phase0.sh"]
+reason = "verify_phase0.sh writes '-lcbc' into a throwaway temp directory and asserts the sovereignty checker rejects it. Testing that the check fails closed requires writing down the thing it must catch."
+
+[[exceptions]]
+token = "highs"
+paths = ["tools/verify_phase0.sh"]
+reason = "The gate script probes for the oracle binary at build-oracle/bin/highs to decide whether the ticket #2 oracle checks can run. A path test, not a dependency."

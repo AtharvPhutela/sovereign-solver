@@ -30,3 +30,4 @@ venv/
 
 # HiGHS CLI writes this in its CWD
 HiGHS.log
+build64/

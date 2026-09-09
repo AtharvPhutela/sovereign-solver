@@ -1,0 +1,69 @@
+# L0 numerical substrate -- Build Map ticket #3, gate M0.
+#
+# One library, `sovereign_l0`, with the GPU backends compiled in only when
+# their toolkit is actually present. The detection is deliberately quiet about
+# absence and loud about presence: a build that silently produced a CPU-only
+# library while a benchmark claimed "GPU" would invalidate every number above
+# it, so `backend_report()` and the configure summary always state what was
+# really compiled.
+
+add_library(sovereign_l0
+  l0/sparse.cpp
+  l0/backend.cpp
+  l0/backend_host.cpp
+)
+
+target_include_directories(sovereign_l0
+  PUBLIC "${CMAKE_SOURCE_DIR}/include")
+
+target_compile_features(sovereign_l0 PUBLIC cxx_std_20)
+
+if(SOVEREIGN_INDEX64)
+  target_compile_definitions(sovereign_l0 PUBLIC SOVEREIGN_INDEX64)
+endif()
+
+if(MSVC)
+  target_compile_options(sovereign_l0 PRIVATE /W4)
+else()
+  target_compile_options(sovereign_l0 PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---------------------------------------------------------------------------
+# CUDA backend
+# ---------------------------------------------------------------------------
+if(SOVEREIGN_WITH_CUDA)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+
+  target_sources(sovereign_l0 PRIVATE l0/backend_cuda.cu)
+  target_compile_definitions(sovereign_l0 PUBLIC SOVEREIGN_WITH_CUDA)
+  # cuSPARSE / cuBLAS are numerical primitives, PERMITTED in sovereignty.toml.
+  target_link_libraries(sovereign_l0 PRIVATE CUDA::cudart CUDA::cublas CUDA::cusparse)
+
+  set_target_properties(sovereign_l0 PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_STANDARD 20
+    CUDA_STANDARD_REQUIRED ON)
+
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    # `native` targets the card in the build machine; override with
+    # -DCMAKE_CUDA_ARCHITECTURES=... when cross-building for a cluster.
+    set_target_properties(sovereign_l0 PROPERTIES CUDA_ARCHITECTURES native)
+  endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# ROCm / HIP backend
+# ---------------------------------------------------------------------------
+if(SOVEREIGN_WITH_HIP)
+  enable_language(HIP)
+  find_package(hip REQUIRED)
+  find_package(rocblas REQUIRED)
+
+  set_source_files_properties(l0/backend_hip.cpp PROPERTIES LANGUAGE HIP)
+  target_sources(sovereign_l0 PRIVATE l0/backend_hip.cpp)
+  target_compile_definitions(sovereign_l0 PUBLIC SOVEREIGN_WITH_HIP)
+  target_link_libraries(sovereign_l0 PRIVATE hip::device roc::rocblas)
+endif()
+
+add_library(sovereign::l0 ALIAS sovereign_l0)

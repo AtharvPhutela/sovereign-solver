@@ -226,6 +226,20 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(code, sc.EXIT_VIOLATION)
         self.assertIn("COIN-OR CBC", out)
 
+    def test_forbidden_git_clone_in_a_shell_script_fails(self):
+        # Regression: shell scripts were not scanned at all, so a setup script
+        # could `git clone` a forbidden solver and no manifest would ever show
+        # it. A build script is exactly where a dependency enters unnoticed.
+        body = MINIMAL_POLICY.replace(
+            '"requirements.txt",',
+            '"requirements.txt", "**/*.sh",')
+        (self.root / "sovereignty.toml").write_text(body)
+        self.write("scripts/setup.sh",
+                   "#!/bin/sh\ngit clone https://github.com/coin-or/Cbc.git\n")
+        code, out = self.run_check()
+        self.assertEqual(code, sc.EXIT_VIOLATION)
+        self.assertIn("COIN-OR CBC", out)
+
     def test_forbidden_in_python_import_fails(self):
         self.write("src/bind.py", "import pyscipopt\n")
         code, out = self.run_check()

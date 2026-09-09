@@ -1,4 +1,10 @@
-# M0-gate CI: sovereignty check (ticket #1) + corpus/oracle suites (ticket #2).
+# M0-gate CI: sovereignty (#1), corpus + oracle (#2), L0 substrate (#3).
+#
+# NOTE ON GPU COVERAGE: GitHub's standard runners have no CUDA toolkit and no
+# ROCm, so src/l0/backend_cuda.cu and src/l0/backend_hip.cpp are NOT compiled
+# here. The parity check below is what guards them against interface drift in
+# the meantime; it is not a substitute for building them. Compiling those two
+# files requires a GPU-equipped runner and is an open item.
 name: m0-gate
 
 on:
@@ -42,7 +48,22 @@ jobs:
       - name: Build (runs the in-build sovereignty target)
         run: cmake --build build
 
-      # Ticket #2: manifest + oracle-wrapper suites (network-free; the real
-      # solver / corpus parts skip cleanly when absent).
-      - name: Ticket #2 test suites
+      # Backends that were not compiled cannot drift silently.
+      - name: L0 backend interface parity (#3)
+        run: python3 tools/check_backend_parity.py --verbose
+
+      # Ticket #2 + #3 suites. Network-free; the real-solver and downloaded-
+      # corpus parts skip cleanly when absent.
+      - name: Test suites
         run: ctest --test-dir build --output-on-failure
+
+      # Both index widths must build and pass: int32 is the default, but a
+      # large instance needs int64 and that path must not rot.
+      - name: Build and test with 64-bit indices (#3)
+        run: |
+          cmake -S . -B build64 -G Ninja -DSOVEREIGN_INDEX64=ON
+          cmake --build build64
+          ctest --test-dir build64 --output-on-failure -L l0
+
+      - name: Phase 0 gate
+        run: tools/verify_phase0.sh build

@@ -257,11 +257,15 @@ Any solver reachable as a file-in/answer-out CLI can be substituted via
 1. **Build manifests** — `CMakeLists.txt`, `*.cmake`, `pyproject.toml`,
    `requirements*.txt`, `vcpkg.json`, `conanfile.*`, `meson.build`, `Makefile`.
 2. **Source** — C/C++/CUDA/HIP and Python, catching `#include` and `import`.
-3. **Submodules** — `.gitmodules`.
-4. **Vendored directories** — any subdirectory of `third_party/`, `extern/`,
-   `vendor/` and friends whose *name* matches a forbidden entry. This catches a
-   raw source drop that no manifest mentions.
-5. **The resolved dependency graph** — with `--cmake-build-dir`, it reads
+3. **Shell scripts** (`*.sh`, `*.bash`) — a setup or build script is exactly
+   where a forbidden dependency enters without appearing in any manifest: a
+   `git clone`, an `apt install`, a downloaded tarball. Scanned for that reason.
+4. **Submodules** — `.gitmodules`.
+5. **Vendored directories** — any subdirectory *or file* of `third_party/`,
+   `extern/`, `vendor/` and friends whose *name* matches a forbidden entry.
+   This catches a raw source drop that no manifest mentions, including a single
+   hand-copied file whose contents never name the library it came from.
+6. **The resolved dependency graph** — with `--cmake-build-dir`, it reads
    `CMakeCache.txt`, `build.ninja` and `link.txt`. This matters because a
    manifest can be perfectly clean while a transitively-pulled target puts a
    forbidden library on the link line. Declared intent and resolved reality are
