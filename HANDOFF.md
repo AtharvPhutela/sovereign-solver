@@ -1,8 +1,10 @@
-# Handoff — Sovereign Solver, state after Ticket #1
+# Handoff — Sovereign Solver, Phase 0 complete
 
-**Last commit:** `b743a65` — *Ticket #1: sovereignty dependency ledger and CI enforcement*
-**Gate:** M0 (in progress — #1 done, #2 and #3 remain before M0 closes)
-**Model note:** #1 was built under Opus 5; this handoff written under Sonnet 5.
+**Last commit:** `efd3a44` — *Ticket #3: L0 numerical substrate and the CUDA/ROCm backend abstraction*
+**Phase 0 (#1, #2, #3): complete.** Gate M0 is *not* closed — it also needs #4
+(CPU simplex oracle) and #5 (MPS/LP parser), both in Phase 1.
+**Phase 0 gate:** `tools/verify_phase0.sh` → 14 passed, 0 failed, 2 not
+verifiable on this machine (the CUDA and HIP backends — see §11.3).
 
 This document covers **only what was written in this repo**. The Bible and Build
 Map explain the *why* and the *what-next* and are uploaded alongside — this fills
@@ -12,16 +14,18 @@ the gap between them and the actual code on disk.
 
 ## 1. Where the project is
 
-Build Map Phase 0, ticket #1 of 55 is complete. The repo was a bare directory
-with three `.md` files; it is now a git repository (`git init` was run — commit
-author `Ashish Phutela <ashishphutela@gmail.com>`) with a CMake skeleton whose
-**only** job right now is to give the sovereignty check something to inspect.
+Build Map Phase 0 (tickets #1–#3 of 55) is complete. The repo was a bare
+directory with three `.md` files; it is now a CMake project with the sovereignty
+machinery, a benchmark corpus and oracle, and the L0 numerical substrate.
 
-**There is no solver code yet.** No parser, no simplex, no L0 containers. That
-starts at ticket #3. `CMakeLists.txt` has commented-out `add_subdirectory(src)`
-and `add_subdirectory(tests)` lines marking where that plugs in.
+**There is still no *solver* yet** — no simplex, no parser, no LP is solved by
+our own code. L0 gives the algorithms their containers and their device
+abstraction; the first thing that actually solves something is ticket #4.
 
-### Files added in this ticket
+Sections §2–§9 below describe ticket #1, §10 ticket #2, §11 ticket #3, §12 the
+Phase 0 gate, §13 what is next.
+
+### Files added in ticket #1
 
 ```
 CMakeLists.txt                     top-level, ~40 lines, scaffolding only
@@ -105,10 +109,13 @@ Confirmed behaviour (these are in the test suite):
    `requirements*.txt`, `vcpkg.json`, `conanfile.*`, `meson.build`, `Makefile`,
    `.gitmodules`, `*.pc`
 2. **Source** — C/C++/CUDA/HIP + Python, catching `#include` and `import`
-3. **Vendored directories** — any subdir of `third_party/`, `extern/`, `vendor/`,
-   `deps/`, `subprojects/`, … whose *name* matches a forbidden entry. Catches a
-   raw source-tree copy that no manifest mentions.
-4. **Resolved dependency graph** — with `--cmake-build-dir <dir>`, reads
+3. **Shell scripts** (`*.sh`, `*.bash`, added in #3) — where a `git clone` or
+   `apt install` of a forbidden library would otherwise enter untouched by any
+   manifest
+4. **Vendored directories** — any subdir *or file* of `third_party/`, `extern/`,
+   `vendor/`, `deps/`, `subprojects/`, … whose *name* matches a forbidden entry.
+   Catches a raw source-tree copy that no manifest mentions.
+5. **Resolved dependency graph** — with `--cmake-build-dir <dir>`, reads
    `CMakeCache.txt`, `build.ninja`, `rules.ninja`, `link.txt`, `*.cmake`. This is
    the pass that catches a forbidden library arriving **transitively** — a
    manifest can be perfectly clean while a pulled-in target puts something on the
@@ -147,8 +154,15 @@ that the filter didn't become a blanket amnesty.
 `[[exceptions]]` entries in `sovereignty.toml` suppress confirmed false
 positives. Each needs a `token`, a mandatory `reason`, and an optional `paths`
 scope. **The checker refuses to run on an exception with no reason** — an
-undocumented suppression is indistinguishable from a breach. There are currently
-zero exceptions (the two bugs above were fixed properly rather than suppressed).
+undocumented suppression is indistinguishable from a breach.
+
+Ticket #1 shipped with zero exceptions (both bugs above were fixed properly
+rather than suppressed). Tickets #2 and #3 added scoped ones, each justified in
+`sovereignty.toml`: the oracle wrapper must name the solver executables it runs
+(`tools/oracle/**`), `fetch_corpus.py` parses a CPLEX *citation* out of the
+Netlib readme, and `verify_phase0.sh` plants violations deliberately to prove
+the checker fails closed. An exception matches by resolved policy entry, so one
+keyed `glpk` also covers a hit on its alias `glpsol`.
 
 ### 2.7 Exit codes
 
@@ -436,28 +450,161 @@ Policy totals now: **76 dependencies — 37 forbidden, 6 restricted, 33 permitte
 
 ### 10.5 How to test ticket #2 (see §12)
 
-`ctest --test-dir build` runs everything. Individual suites:
+`ctest --test-dir build` runs everything (7 suites). Individual:
 `python3 tests/test_oracle.py`, `python3 tests/test_corpus.py`,
 `python3 tools/oracle/check_reference.py`.
 
 ---
 
-## 11. Immediate next steps
+## 11. Ticket #3 — L0 numerical substrate (commit `efd3a44`)
 
-M0 still needs **#3** before Phase 1's simplex oracle (#4).
+### 11.1 What was built
 
-- **#3** — L0 numerical substrate: CSR + CSC containers (VBCSR/BSR stubs),
-  mixed-precision type policy (fp64 real, fp32/fp16 flagged unused), and the
-  CUDA↔ROCm backend abstraction (CUDA impl + ROCm stub). When `src/` gets real
-  content, uncomment `add_subdirectory(src)` in `CMakeLists.txt`; the
-  sovereignty check picks it up automatically (globs already cover `**/*.cpp`,
-  `**/*.cu`, …). **Blocker on this machine:** no CUDA toolkit, no ROCm, no
-  BLAS/LAPACK — the abstraction layer and CSR containers can be built and
-  unit-tested CPU-only, but any GPU kernel or BLAS call needs the toolchain
-  installed first (see §9).
-- When #3 lands, add any new permitted deps (OpenBLAS, GoogleTest, cuSPARSE…)
-  to `sovereignty.toml` **and** `DEPENDENCY_LEDGER.md` in the same commit, and
-  extend `test_sovereignty_check.py`'s `RealRepositoryTests` list.
+```
+include/sovereign/
+  numeric.hpp     scalar + index policy, tolerances, close()
+  status.hpp      Status enum, Error, check()
+  sparse.hpp      CsrMatrix, CscMatrix, Triplet, VbcsrMatrix/BsrMatrix stubs
+  backend.hpp     Backend interface, DeviceBuffer, DeviceCsr, factory
+src/l0/
+  sparse.cpp        containers, validation, CSR<->CSC
+  backend.cpp       factory + owning device handles
+  backend_host.cpp  full reference implementation (always compiled)
+  backend_cuda.cu   cuSPARSE/cuBLAS   -- compiled only if CUDA found
+  backend_hip.cpp   rocBLAS skeleton  -- compiled only if ROCm found
+cmake/DetectAccelerators.cmake   toolkit detection + configure summary
+tests/
+  test_support.hpp     ~120-line harness (no GoogleTest: avoids a CI network dep)
+  test_l0_sparse.cpp   18 cases
+  test_l0_backend.cpp  21 cases, run over EVERY compiled backend
+tools/
+  check_backend_parity.py  interface-drift guard for the uncompiled GPU backends
+  verify_phase0.sh         Phase 0 gate against the Build Map's "Done when"
+```
+
+### 11.2 Design decisions worth knowing
+
+**Three backends, not two.** Host is a complete reference implementation, not a
+placeholder. It plays the same role for the GPU kernels that the from-scratch
+CPU simplex (#4) plays for the GPU solvers: the independent answer. It also
+makes the abstraction falsifiable — an interface with one implementation is a
+fiction shaped around that implementation, and every call site is now exercised
+by more than one.
+
+**VRAM residency is structural.** `DeviceCsr` and `DeviceBuffer` are move-only,
+so a deep copy of the constraint matrix does not compile. Every backend counts
+its host↔device transfers, so `backend.matrix_crosses_the_bus_exactly_once`
+*asserts* residency rather than assuming it (3 uploads for the 3 CSR arrays,
+then 32 SpMVs with zero further traffic).
+
+**CSR and CSC are peers.** PDHG needs `Ax` and `Aᵀy` every iteration, so
+`spmv_transpose` is a primitive, not `spmv` on a materialized transpose — that
+would double the resident footprint of the largest object in the solver.
+
+**`beta == 0` overwrites, never scales.** `0 * NaN` is `NaN`. A `y` buffer
+holding a NaN from a previous failed solve would otherwise poison every
+subsequent iteration, surfacing far from its cause. Tested explicitly.
+
+**Index width is a switch** (`-DSOVEREIGN_INDEX64=ON`). int32 halves index
+bandwidth in a memory-bound SpMV and is what cuSPARSE wants; the PS asks for
+instances that can exceed 2³¹ nonzeros. CI builds and tests both.
+
+**No GoogleTest.** Permitted, but pulling it in means a FetchContent download
+into the build tree and a network dependency in CI to replace ~120 lines. Swap
+when the suite outgrows `test_support.hpp`; nothing depends on the harness
+beyond its macros.
+
+### 11.3 The GPU gap — read this before trusting anything GPU-shaped
+
+**`backend_cuda.cu` and `backend_hip.cpp` have never been compiled or run.**
+This machine has no CUDA toolkit and no ROCm (§9). They are written against the
+documented cuSPARSE/cuBLAS/rocBLAS APIs and must be treated as **unverified**
+until a build with a toolkit says otherwise. Expect them not to compile first
+time.
+
+Two things mitigate it, neither of which is a substitute:
+
+1. **`DetectAccelerators.cmake` never lies about what was built.** The configure
+   summary states which backends were compiled and why not, and
+   `-DSOVEREIGN_CUDA=ON` with no toolkit is a hard `FATAL_ERROR` rather than a
+   silent host fallback — a benchmark claiming "GPU" while running on the CPU
+   would invalidate every number above it.
+2. **`tools/check_backend_parity.py`** catches the one defect class that *is*
+   detectable without a toolkit: interface drift. Add a method to `Backend` and
+   the compiler flags Host while saying nothing about the two GPU backends. This
+   parses `backend.hpp` for pure virtuals and confirms each backend overrides
+   them (declining with `Status::Unsupported` is fine; being absent is not).
+   Registered as the `l0_backend_parity` ctest.
+
+**When you get a GPU machine:** `cmake -S . -B build -DSOVEREIGN_CUDA=ON`, fix
+the compile errors, then run `./build/tests/test_l0_backend` — the existing 21
+cases become the host-vs-device differential test with no edit, because
+`for_each_backend` already loops over everything compiled.
+
+### 11.4 Tests can actually fail (verified)
+
+39 C++ cases passing on the first run is suspicious for numerical code, so three
+deliberate sabotages were run and reverted:
+
+| Sabotage | Caught by |
+|---|---|
+| off-by-one in the SpMV row loop (`k + 1 < end`) | 4 cases red |
+| `beta == 0` scales instead of overwriting | the NaN case red |
+| backend pretends to re-upload per SpMV | residency case red, with its own message |
+
+### 11.5 Sovereignty change in this ticket
+
+**Shell scripts are now scanned** (`**/*.sh`, `**/*.bash`). A setup script is
+exactly where a forbidden dependency enters without touching any manifest — a
+`git clone`, an `apt install`, a downloaded tarball. Verified: a `git clone
+.../Cbc.git` in a `.sh` is now caught. `install_highs.sh` stays silent (covered
+by the `tools/oracle/**` scope); `verify_phase0.sh` needed exceptions because it
+plants violations on purpose.
+
+---
+
+## 12. Phase 0 gate
+
+`tools/verify_phase0.sh` checks tickets #1/#2/#3 against the Build Map's own
+"Done when" wording rather than against "the tests pass" — those are different
+claims. It re-plants a forbidden dependency in a temp directory to confirm the
+checker still fails closed, and reports anything unverifiable as **NOTE** rather
+than folding it into a pass.
+
+Current result on this machine:
+
+```
+Phase 0: 14 passed, 0 failed, 2 not verifiable here
+```
+
+The two NOTEs are the uncompiled CUDA and HIP backends. They are real gaps
+carried forward, not passes.
+
+---
+
+## 13. Immediate next steps
+
+Phase 0 (#1, #2, #3) is complete. **M0 is not closed** — it also needs #4 and
+#5, in Phase 1.
+
+- **#4 — from-scratch CPU revised simplex.** The correctness oracle we own.
+  Anti-cycling (Bland / lexicographic) from the start, not as a later patch:
+  without it the solver stalls on exactly the degenerate instances the PS grades
+  on. `benchmarks/smoke/tiny_degenerate.mps` exists for this. Build it on
+  `CsrMatrix` (#3) and check it against both the external oracle (#2) and
+  `smoke/expected.toml`. Correct and clear, not fast — Bible Part II is explicit
+  that chasing the CPU curve is the trap.
+- **#5 — MPS / LP parser.** Front door for every benchmark instance. The 90
+  local Netlib instances are the test set, and `run_oracle.py` reports each
+  instance's dimensions so parsed row/col/nnz counts can be diffed against the
+  oracle's own parse. Watch RANGES, BOUNDS types and free rows — a silently
+  mishandled dialect produces a *different problem*, and the resulting "wrong
+  answer vs oracle" is a parsing bug wearing a numerical disguise.
+- **Blocker for Phase 2 (#8 onward):** still no CUDA/ROCm/BLAS on this machine
+  (§9, §11.3). #4 and #5 are unaffected — both are pure host code.
+- **When adding a dependency:** classify it in `sovereignty.toml` **and**
+  `DEPENDENCY_LEDGER.md` in the same commit, and extend
+  `test_sovereignty_check.py`'s `RealRepositoryTests` list.
 
 ---
 
@@ -489,12 +636,24 @@ python3 tests/test_oracle.py                                  # 14 tests
 python3 tests/test_corpus.py                                  # 20 tests
 ```
 
-Expected: sovereignty `OK`, `ctest` 4/4, `check_reference.py` `PASS: 10/10`,
-`--verify` `90/90 instances intact`, all Python suites `OK`.
+```sh
+# the L0 substrate (ticket #3)
+./build/tests/test_l0_sparse                                  # 18 cases
+./build/tests/test_l0_backend                                 # 21 cases, per backend
+python3 tools/check_backend_parity.py -v                      # interface drift guard
+cmake -S . -B build64 -G Ninja -DSOVEREIGN_INDEX64=ON && cmake --build build64
+ctest --test-dir build64 -L l0                                # the int64 configuration
+
+# everything at once, against the Build Map's own "Done when" wording
+./tools/verify_phase0.sh
+```
+
+Expected: sovereignty `OK`, `ctest` 7/7, `check_reference.py` `PASS: 10/10`,
+`--verify` `90/90 instances intact`, L0 `18 passed` / `21 passed`, and
+`verify_phase0.sh` `14 passed, 0 failed, 2 not verifiable here`.
 
 To rebuild the oracle from scratch (e.g. on another machine):
 `tools/oracle/install_highs.sh` then `python3 benchmarks/fetch_corpus.py`.
 
-**Not yet testable** (needs ticket #3 + a GPU/BLAS toolchain): anything that
-solves an LP with our *own* code. The oracle is the reference; we haven't
-written the thing it's a reference *for* yet.
+**Not yet testable:** anything that *solves an LP with our own code* — that is
+ticket #4. And the CUDA/HIP backends, which need a GPU toolchain (§11.3).
