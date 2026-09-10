@@ -42,6 +42,22 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/oracle/check_reference.py")
   set_tests_properties(oracle_end_to_end PROPERTIES LABELS "m0;oracle")
 
+  # Ticket #5 pass condition: the MPS/LP reader reproduces every downloaded
+  # instance's rows/columns/nonzeros identically to the oracle's own parse.
+  add_test(NAME parser_vs_oracle
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/check_parser_vs_oracle.py")
+  set_tests_properties(parser_vs_oracle PROPERTIES LABELS "m0;io")
+
+  # Ticket #4 pass condition: the from-scratch simplex agrees with the oracle
+  # on Netlib and with the hand-verified smoke answers. Row-capped so ctest
+  # stays quick; the dense basis makes larger instances a performance study,
+  # not a correctness one. Both scripts skip cleanly (exit 0) when the oracle
+  # binary or the corpus is absent.
+  add_test(NAME simplex_vs_oracle
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/check_simplex_vs_oracle.py"
+            --max-rows 250 --timeout 60)
+  set_tests_properties(simplex_vs_oracle PROPERTIES LABELS "m0;simplex" TIMEOUT 900)
+
   if(EXISTS "${_ORACLE_HIGHS}")
     message(STATUS "Benchmark oracle: ${_ORACLE_HIGHS}")
   else()

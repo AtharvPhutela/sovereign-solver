@@ -53,6 +53,9 @@ include(Oracle)
 # the CUDA/ROCm backend abstraction.
 add_subdirectory(src)
 
+# Tickets #4/#5 -- CLI front end (and the seed of #50).
+add_subdirectory(apps)
+
 if(BUILD_TESTING)
   add_subdirectory(tests)
 endif()

@@ -11,6 +11,16 @@ add_library(sovereign_l0
   l0/sparse.cpp
   l0/backend.cpp
   l0/backend_host.cpp
+  # Ticket #5 -- model readers (L6 interface layer, Bible S4.7). Kept in the
+  # same library for now; they split out when the layering earns its own
+  # targets.
+  io/problem.cpp
+  io/mps_reader.cpp
+  io/lp_reader.cpp
+  # Ticket #4 -- the from-scratch simplex, our own correctness oracle.
+  l1/simplex.cpp
+  # Ticket #6 -- Ruiz + Pock-Chambolle preconditioning.
+  l1/scaling.cpp
 )
 
 target_include_directories(sovereign_l0

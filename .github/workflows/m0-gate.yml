@@ -1,10 +1,17 @@
-# M0-gate CI: sovereignty (#1), corpus + oracle (#2), L0 substrate (#3).
+# M0-gate CI: the whole of Phase 0.
+#   #1 sovereignty  #2 corpus + oracle  #3 L0 substrate
+#   #4 from-scratch simplex  #5 MPS/LP parser  #6 preconditioning
 #
 # NOTE ON GPU COVERAGE: GitHub's standard runners have no CUDA toolkit and no
 # ROCm, so src/l0/backend_cuda.cu and src/l0/backend_hip.cpp are NOT compiled
 # here. The parity check below is what guards them against interface drift in
 # the meantime; it is not a substitute for building them. Compiling those two
 # files requires a GPU-equipped runner and is an open item.
+#
+# The oracle-dependent suites (parser_vs_oracle, simplex_vs_oracle,
+# oracle_end_to_end) skip cleanly when build-oracle/ and the Netlib corpus are
+# absent, so a bare CI run stays green; a job that also builds the oracle and
+# fetches Netlib exercises them for real.
 name: m0-gate
 
 on:

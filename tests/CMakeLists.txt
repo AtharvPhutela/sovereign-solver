@@ -19,6 +19,16 @@ endfunction()
 sovereign_add_test(test_l0_sparse  test_l0_sparse.cpp)
 sovereign_add_test(test_l0_backend test_l0_backend.cpp)
 
+# Ticket #5 -- model readers.
+sovereign_add_test(test_mps_reader test_mps_reader.cpp)
+sovereign_add_test(test_lp_reader  test_lp_reader.cpp)
+
+# Ticket #4 -- the from-scratch simplex.
+sovereign_add_test(test_simplex    test_simplex.cpp)
+
+# Ticket #6 -- preconditioning.
+sovereign_add_test(test_scaling    test_scaling.cpp)
+
 # Interface parity. On a machine with no CUDA/ROCm toolkit the GPU backends are
 # never compiled, so a change to the Backend interface would leave them behind
 # silently. This is the part of their correctness checkable without a GPU.

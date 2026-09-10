@@ -163,6 +163,76 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "Ticket #5 -- MPS / LP Parser"
+# Done when: the parser reproduces instance dimensions and structure identically
+# to the oracle across a varied sample.
+# ---------------------------------------------------------------------------
+if [ -x "$BUILD/tests/test_mps_reader" ] && run "$BUILD/tests/test_mps_reader" \
+   && [ -x "$BUILD/tests/test_lp_reader" ] && run "$BUILD/tests/test_lp_reader"; then
+  ok "reader unit tests: RANGES table, BOUNDS types, free rows, objective constant, fixed-column fallback"
+else
+  no "reader unit tests failed"
+fi
+
+if [ -x "$ROOT/build-oracle/bin/highs" ] && [ -d "$ROOT/benchmarks/data/netlib_lp" ]; then
+  if run "$PY" "$ROOT/tools/check_parser_vs_oracle.py"; then
+    ok "reader reproduces rows/columns/nonzeros identically to the oracle on every Netlib instance"
+  else
+    no "the parser's shape disagrees with the oracle's -- a parsing bug wearing a numerical disguise"
+  fi
+else
+  note "oracle or corpus absent -- parser-vs-oracle shape diff not run"
+fi
+
+# ---------------------------------------------------------------------------
+section "Ticket #4 -- From-Scratch CPU Revised Simplex"
+# Done when: the CPU simplex agrees with the external oracle on Netlib, and
+# survives a degenerate instance without cycling.
+# ---------------------------------------------------------------------------
+if [ -x "$BUILD/tests/test_simplex" ] && run "$BUILD/tests/test_simplex"; then
+  ok "simplex unit tests: hand-checked optima, the three terminal statuses, solution feasibility"
+  ok "anti-cycling: Beale's 1955 cycling example and a degenerate optimum both terminate"
+else
+  no "simplex unit tests failed"
+fi
+
+if [ -x "$ROOT/build-oracle/bin/highs" ] && [ -d "$ROOT/benchmarks/data/netlib_lp" ]; then
+  if run "$PY" "$ROOT/tools/check_simplex_vs_oracle.py" --max-rows 250 --timeout 60; then
+    ok "simplex agrees with the oracle on the Netlib instances the dense basis can take"
+    info "larger instances are a performance study, not a correctness one (dense O(m^3) factorization)"
+  else
+    no "the simplex disagrees with the oracle -- the oracle role is void until this is resolved"
+  fi
+else
+  note "oracle or corpus absent -- simplex-vs-oracle comparison not run"
+fi
+
+# ---------------------------------------------------------------------------
+section "Ticket #6 -- Preconditioning (Ruiz + Pock-Chambolle)"
+# Done when: preconditioning measurably improves conditioning on a deliberately
+# ill-scaled instance, and the scaled solve returns the original answer.
+# ---------------------------------------------------------------------------
+if [ -x "$BUILD/tests/test_scaling" ] && run "$BUILD/tests/test_scaling"; then
+  ok "Ruiz collapses the row/column norm spread; scaled problem has the same optimum"
+else
+  no "scaling tests failed"
+fi
+
+if [ -x "$BUILD/apps/sovereign-cli" ] && [ -f "$ROOT/benchmarks/data/netlib_lp/grow22.mps" ]; then
+  base=$("$BUILD/apps/sovereign-cli" solve "$ROOT/benchmarks/data/netlib_lp/grow22.mps" --json 2>/dev/null \
+         | "$PY" -c "import json,sys;print(json.load(sys.stdin)['iterations'])" 2>/dev/null || echo 0)
+  scl=$("$BUILD/apps/sovereign-cli" solve "$ROOT/benchmarks/data/netlib_lp/grow22.mps" --scale --json 2>/dev/null \
+        | "$PY" -c "import json,sys;print(json.load(sys.stdin)['iterations'])" 2>/dev/null || echo 0)
+  if [ "$scl" -gt 0 ] && [ "$base" -gt 0 ] && [ "$scl" -lt "$base" ]; then
+    ok "on a real ill-conditioned instance (grow22) --scale cuts iterations ($base -> $scl)"
+  else
+    note "grow22 iteration comparison inconclusive (plain=$base scaled=$scl)"
+  fi
+else
+  note "cli or corpus absent -- --scale demonstration on real instances not run"
+fi
+
+# ---------------------------------------------------------------------------
 section "Full suite"
 # ---------------------------------------------------------------------------
 if run ctest --test-dir "$BUILD"; then

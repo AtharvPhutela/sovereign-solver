@@ -582,78 +582,207 @@ carried forward, not passes.
 
 ---
 
-## 13. Immediate next steps
+## 13. Tickets #5, #4, #6 — parser, simplex, preconditioning (Phase 1, M0)
 
-Phase 0 (#1, #2, #3) is complete. **M0 is not closed** — it also needs #4 and
-#5, in Phase 1.
+Built in dependency order: #5 first (the simplex test *is* "solve Netlib", which
+needs a reader), then #4, then #6.
 
-- **#4 — from-scratch CPU revised simplex.** The correctness oracle we own.
-  Anti-cycling (Bland / lexicographic) from the start, not as a later patch:
-  without it the solver stalls on exactly the degenerate instances the PS grades
-  on. `benchmarks/smoke/tiny_degenerate.mps` exists for this. Build it on
-  `CsrMatrix` (#3) and check it against both the external oracle (#2) and
-  `smoke/expected.toml`. Correct and clear, not fast — Bible Part II is explicit
-  that chasing the CPU curve is the trap.
-- **#5 — MPS / LP parser.** Front door for every benchmark instance. The 90
-  local Netlib instances are the test set, and `run_oracle.py` reports each
-  instance's dimensions so parsed row/col/nnz counts can be diffed against the
-  oracle's own parse. Watch RANGES, BOUNDS types and free rows — a silently
-  mishandled dialect produces a *different problem*, and the resulting "wrong
-  answer vs oracle" is a parsing bug wearing a numerical disguise.
-- **Blocker for Phase 2 (#8 onward):** still no CUDA/ROCm/BLAS on this machine
-  (§9, §11.3). #4 and #5 are unaffected — both are pure host code.
-- **When adding a dependency:** classify it in `sovereignty.toml` **and**
-  `DEPENDENCY_LEDGER.md` in the same commit, and extend
-  `test_sovereignty_check.py`'s `RealRepositoryTests` list.
+### 13.1 What was built
+
+```
+include/sovereign/
+  problem.hpp     canonical internal model: minimize/maximize, two-sided row
+                  bounds (lo <= Ax <= hi), column bounds, integrality, names
+  io.hpp          read_mps / read_lp / read_model, ReaderWarning, MpsOptions
+  simplex.hpp     Simplex, SimplexOptions, SimplexResult, SolveStatus
+  scaling.hpp     Scaling (Ruiz + Pock-Chambolle), ScalingOptions, Conditioning
+src/io/
+  problem.cpp       model container + name-addressed Builder
+  mps_reader.cpp    free-form MPS, with a fixed-column fallback
+  lp_reader.cpp     CPLEX LP subset
+src/l1/
+  simplex.cpp       revised primal simplex, bounded-variable, two-phase, EXPAND
+  scaling.cpp       equilibration + solution mapping
+apps/
+  sovereign_cli.cpp   `sovereign-cli info|solve [--scale] [--json] <model>`
+tests/
+  test_mps_reader.cpp  24 cases   test_lp_reader.cpp  16 cases
+  test_simplex.cpp     20 cases   test_scaling.cpp     6 cases
+tools/
+  check_parser_vs_oracle.py    rows/cols/nnz vs the oracle's own parse
+  check_simplex_vs_oracle.py   objective vs the oracle (not the stale readme)
+```
+
+### 13.2 Ticket #5 — the parser
+
+**Canonical form is two-sided row bounds** (`lo <= Ax <= hi`). MPS row senses
+(`L`/`G`/`E`), the `RANGES` section, and free rows all become `(lo, hi)` pairs
+with infinities marking the one-sided cases — so `RANGES` is an assignment, not
+a special case, and it is the form the presolve (#13) and both continuous
+engines want anyway.
+
+Quirks handled explicitly, each with a test that fails on the wrong behaviour:
+
+| Quirk | Rule implemented |
+|---|---|
+| First `N` row is the objective; **later `N` rows are free rows** | objective is never a row of `A`; free rows are kept so counts match the file |
+| RHS entry **on the objective row** | it is the **negated** objective constant (a sign error shifts every reported objective by `2d`) |
+| `RANGES` on `E` rows | **sign-dependent**: `R>=0 -> [b, b+R]`, `R<0 -> [b+R, b]`; `L`/`G` use `|R|` |
+| `BOUNDS` `UP` with a negative value on a default-`[0,inf)` column | lower bound goes to `-inf` (the established-solver convention); **recorded as a warning**, and `MpsOptions` can select the literal reading |
+| Duplicate `(row, col)` coefficients | summed |
+| `MARKER`/`INTORG`/`INTEND` | integral, but bounds stay `[0, inf)` — not silently `[0,1]`, which would cut off the optimum of every general-integer model |
+| Semi-continuous (`SC`), `QSECTION`, SOS | **refused or warned, never silently reinterpreted** |
+
+**The fixed-column lesson.** The header comment first claimed no Netlib
+instance uses embedded spaces in names. `forplan` does (`DEDO3 1R`), and
+free-form tokenization split it into a duplicate `DEDO3`. Fix: a free-form
+parse failure triggers a retry under fixed-column field offsets (2-3, 5-12,
+15-22, 25-36, 40-47, 50-61), and the fallback is recorded as a warning. This is
+exactly the "silently builds a different problem" failure the ticket warns about
+— had the split names stayed unique it would have surfaced much later as a
+numerical mystery.
+
+**Pass condition met on the whole corpus, not a sample:**
+`check_parser_vs_oracle.py` → **90/90 Netlib instances match the oracle's rows,
+columns and nonzeros exactly.**
+
+### 13.3 Ticket #4 — the from-scratch simplex
+
+**A revised _primal_ simplex, not the dual the Build Map names.** The reasoning
+is the oracle role: dual simplex needs a manufactured dual-feasible starting
+basis whose bugs would be indistinguishable from the bugs it is meant to catch.
+The primal two-phase method starts from the slack basis, which always exists, so
+correctness is checkable end to end. The dual variant belongs with ticket #38,
+where warm-starting is what actually needs it.
+
+- **Computational form** `[A -I][x; s] = 0` with a bound pair on every variable
+  — a starting basis (`-I`) always exists, and ranges/equalities/free rows are
+  just bound pairs.
+- **Dense LU of the basis** with partial pivoting, refactorized every 100
+  pivots, product-form (eta) updates between. Deliberately capped at
+  `kMaxDenseRows = 3000`: sparse LU with Markowitz pivoting is the real answer
+  and is named as follow-up, not half-attempted. Larger instances are refused
+  with a clear message, not ground through.
+- **Anti-cycling is EXPAND** (Gill, Murray, Saunders & Wright 1989), added
+  during this work after `brandy` cycled forever. A working feasibility
+  tolerance grows every pivot and resets at each refactorization; because it is
+  strictly increasing between resets, the relaxed feasible region differs every
+  iteration and a basis cannot recur — the ratio test always has room for a
+  strictly positive step, even at a fully degenerate vertex. Bland's rule is
+  kept as a cheap secondary net. The earlier bug: an absolute-plus-relative
+  pivot floor big enough to be numerically safe also excluded small-but-real
+  pivots from the ratio test, which quietly voided Bland's guarantee.
+- **EXPAND endgame.** The relaxed ratio test can declare optimality a few `1e-7`
+  outside a true bound; left alone that leaked `~1e-5` into the reported
+  objective (`scsd1`, `wood1p`). So after Phase 2 converges, expansion is
+  switched off, the basis is rebuilt exactly, and a bounded burst of exact
+  pivots refines the point to a true vertex.
+- **Progress-stall net.** If the merit function (infeasibility in Phase 1,
+  objective in Phase 2) does not improve for `~40*(m+n)` pivots, refactorize
+  once and, failing that, stop with `NumericalFailure` — never a wrong
+  `Optimal`.
+
+**Verification (both halves of the ticket's pass condition):**
+- `test_simplex` — 20 hand-checked cases, including **Beale's 1955 cycling
+  example** (the canonical anti-cycling test) and a primal-degenerate optimum,
+  both terminating; plus a test that the reported *point* is feasible, not just
+  that the objective number matches.
+- `check_simplex_vs_oracle.py --max-rows 250` → **30/30 agree with the oracle**
+  (26 Netlib + 4 hand-verified smoke), `brandy` among them.
+- **The 1988 Netlib readme is stale for two instances** (`e226`, `scagr7`):
+  our answer and the oracle's agree with each other and differ from the printed
+  table. The harness flags this rather than picking a winner — the running
+  oracle is the reference (Oracle rule), a 37-year-old table is not.
+
+### 13.4 Ticket #6 — preconditioning
+
+`Scaling::equilibrate` runs **Ruiz** (iterative row/column inf-norm
+equilibration toward 1) then **Pock-Chambolle** (the diagonal step-size
+preconditioner PDHG needs) on top. Works on a `Problem` — rescaling the matrix,
+the objective, and the row/column bounds consistently — and carries the factors
+so a scaled solve maps back to the original answer. The arithmetic is
+row/column reductions and an elementwise divide, i.e. the L0 backend
+primitives; this runs on the host `CsrMatrix` (the host is a backend), and the
+device version is the same formulas through the backend calls.
+
+**Pass condition met:**
+- `test_scaling` — on a matrix with coefficients spanning `1e-6` to `1e+6`, the
+  row- and column-norm spread collapses to `< 1.5`; and the scaled problem
+  solved through the simplex returns the original optimum (objective and point)
+  to `1e-6`.
+- End to end via the CLI: `sovereign-cli solve grow22.mps --scale` cuts
+  iterations **1263 -> 606** for the same optimum; `scfxm1` 590 -> 433;
+  `pilot4` 3941 -> 3535.
+
+### 13.5 The CLI (seed of #50)
+
+`sovereign-cli info <model> [--json] [--warnings]` — shape, row-type histogram,
+coefficient spread, reader warnings.
+`sovereign-cli solve <model> [--json] [--scale] [--bland] [--refactor N]
+[--time-limit S] [--max-iterations N]` — solve the LP relaxation, report status
+/ objective / iterations / anti-cycling activity.
 
 ---
 
-## 12. What you can test right now
+## 14. M0 status
 
-Everything below is green on this machine as of commit `3178a54`.
+**M0 is complete.** Its benchmark pass condition — *"from-scratch CPU simplex
+solves Netlib to tolerance vs. oracle"* — is green, and every M0-tagged ticket
+(#1-#6) is built and verified.
+
+`tools/verify_phase0.sh` → **21 passed, 0 failed, 2 not verifiable here.** The
+two NOTEs are the uncompiled CUDA and HIP backends (no toolkit on this machine);
+they are carried gaps, not passes. `ctest` → **13/13**.
+
+Remaining Phase-0-adjacent gap, unchanged: `stocfor3` and `truss` are not in the
+local corpus (shell-archive packed format, skipped for M0).
+
+---
+
+## 15. Immediate next steps
+
+Phase 1 is done. Next is **Phase 2 — the GPU continuous core** (M1): tickets #6
+is already in place as the preconditioning front-end, so #7 (Farkas/duals
+plumbing), #8 (PDHG/PDLP), #9 (pivoting-free IPM), #10 (the concurrent engine
+race).
+
+**This is where the missing toolchain finally bites.** #8 and #9 are GPU
+engines; there is no CUDA/ROCm and no BLAS on this machine (§9, §11.3). Options:
+provision this box, use a different one, or build the PDHG/IPM math against the
+**host backend** first (it is a real backend, and `Backend` already has `spmv`,
+`axpy`, `dot`, `project_box`, `norm2`) and treat the GPU port as a later step —
+the abstraction was built precisely so that is possible.
+
+**When adding a dependency** (OpenBLAS, cuSPARSE, …): classify it in
+`sovereignty.toml` **and** `DEPENDENCY_LEDGER.md` in the same commit, and extend
+`test_sovereignty_check.py`'s `RealRepositoryTests` list.
+
+---
+
+## 16. What you can test right now
+
+Green on this machine as of the tickets #4/#5/#6 commit.
 
 ```sh
-# one shot — configure, run the in-ALL sovereignty target, run every suite
 cd /home/arch_btw/Documents/SIH
 rm -rf build && cmake -S . -B build -G Ninja
-cmake --build build          # fails the build on any sovereignty violation
-ctest --test-dir build       # 4 tests: sovereignty self-test, oracle, corpus, e2e probe
+cmake --build build            # in-ALL sovereignty check runs here
+ctest --test-dir build         # 13 suites
 
-# the sovereignty check directly
-python3 tools/sovereignty_check.py --cmake-build-dir build --check-ledger -v
-python3 tools/sovereignty_check.py --explain kahypar          # any dependency
-python3 tools/test_sovereignty_check.py                       # 45 tests
+./tools/verify_phase0.sh       # 21 passed, 0 failed, 2 not verifiable
 
-# the oracle end to end
-tools/oracle/run_oracle.py benchmarks/data/netlib_lp/afiro.mps --with-solution
-tools/oracle/check_reference.py                               # 10 instances vs published optima
-tools/oracle/check_reference.py --all                         # all 90 (slower)
+# the parser and simplex, against the oracle
+python3 tools/check_parser_vs_oracle.py            # PASS: 90/90
+python3 tools/check_simplex_vs_oracle.py --max-rows 250   # PASS: 30/30
 
-# the corpus
-python3 benchmarks/fetch_corpus.py --list
-python3 benchmarks/fetch_corpus.py --verify                   # 90/90 sha256 intact
-python3 tests/test_oracle.py                                  # 14 tests
-python3 tests/test_corpus.py                                  # 20 tests
+# individual C++ suites
+./build/tests/test_mps_reader ./build/tests/test_lp_reader
+./build/tests/test_simplex ./build/tests/test_scaling
+
+# the CLI
+./build/apps/sovereign-cli info  benchmarks/data/netlib_lp/forplan.mps --warnings
+./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/brandy.mps
+./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/grow22.mps --scale
 ```
 
-```sh
-# the L0 substrate (ticket #3)
-./build/tests/test_l0_sparse                                  # 18 cases
-./build/tests/test_l0_backend                                 # 21 cases, per backend
-python3 tools/check_backend_parity.py -v                      # interface drift guard
-cmake -S . -B build64 -G Ninja -DSOVEREIGN_INDEX64=ON && cmake --build build64
-ctest --test-dir build64 -L l0                                # the int64 configuration
-
-# everything at once, against the Build Map's own "Done when" wording
-./tools/verify_phase0.sh
-```
-
-Expected: sovereignty `OK`, `ctest` 7/7, `check_reference.py` `PASS: 10/10`,
-`--verify` `90/90 instances intact`, L0 `18 passed` / `21 passed`, and
-`verify_phase0.sh` `14 passed, 0 failed, 2 not verifiable here`.
-
-To rebuild the oracle from scratch (e.g. on another machine):
-`tools/oracle/install_highs.sh` then `python3 benchmarks/fetch_corpus.py`.
-
-**Not yet testable:** anything that *solves an LP with our own code* — that is
-ticket #4. And the CUDA/HIP backends, which need a GPU toolchain (§11.3).
+**Not yet testable:** the GPU continuous core (#8, #9) — needs a toolchain.
