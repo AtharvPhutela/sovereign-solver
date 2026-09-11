@@ -834,6 +834,11 @@ SimplexResult SimplexImpl::run() {
     if (problem_.has_crossed_bounds()) {
         result_.status = SolveStatus::Infeasible;
         result_.message = "a bound pair is crossed (lower > upper)";
+        // No Farkas certificate here: this is caught before any solve begins,
+        // and readers already refuse a crossed *column* pair outright, so a
+        // caller reaching this path is looking at a crossed *row* pair with
+        // no basis to have taken a dual from yet. Ticket #7's certificate is
+        // for the case where a genuine solve discovers infeasibility.
         return result_;
     }
 
@@ -873,6 +878,18 @@ SimplexResult SimplexImpl::run() {
         if (primal_infeasibility() > 1e-6) {
             result_.status = SolveStatus::Infeasible;
             result_.primal_infeasibility = primal_infeasibility();
+
+            // Ticket #7: the Phase I dual at this exact point is a Farkas
+            // certificate (see duals.hpp for why). phase1_costs() refreshes
+            // which basic variables are violating before pricing reads them;
+            // price()'s side effect of computing duals_ is what we want, not
+            // its return value -- there is no more improving column here by
+            // construction, this just recomputes y for the final basis.
+            phase1_costs();
+            Real unused_reduced = 0.0, unused_direction = 0.0;
+            price(/*phase1=*/true, &unused_reduced, &unused_direction);
+            result_.farkas.row_multipliers.assign(duals_.begin(), duals_.end());
+
             result_.seconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - start_).count();
             return result_;

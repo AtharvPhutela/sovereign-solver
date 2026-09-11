@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "sovereign/duals.hpp"
 #include "sovereign/numeric.hpp"
 #include "sovereign/problem.hpp"
 
@@ -103,6 +104,13 @@ struct SimplexResult {
     Real primal_infeasibility = 0.0;
     Real dual_infeasibility = 0.0;
     std::string message;
+
+    /// Populated only when status == Infeasible (Build Map ticket #7, Bible
+    /// S4.2A.1 / S4.5.2): the Phase I dual at the point infeasibility was
+    /// detected, which is exactly a Farkas certificate for this model. Callers
+    /// that need an actual proof -- Benders' feasibility cuts, conflict-cut
+    /// derivation -- read this rather than trusting the status enum alone.
+    FarkasCertificate farkas;
 };
 
 class Simplex {

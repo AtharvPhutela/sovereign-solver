@@ -741,10 +741,9 @@ local corpus (shell-archive packed format, skipped for M0).
 
 ## 15. Immediate next steps
 
-Phase 1 is done. Next is **Phase 2 — the GPU continuous core** (M1): tickets #6
-is already in place as the preconditioning front-end, so #7 (Farkas/duals
-plumbing), #8 (PDHG/PDLP), #9 (pivoting-free IPM), #10 (the concurrent engine
-race).
+Phase 1 is done. Phase 2 — the GPU continuous core (M1) — is underway: #7
+(Farkas/duals plumbing) is built (§17); next is #8 (PDHG/PDLP), #9
+(pivoting-free IPM), #10 (the concurrent engine race).
 
 **This is where the missing toolchain finally bites.** #8 and #9 are GPU
 engines; there is no CUDA/ROCm and no BLAS on this machine (§9, §11.3). Options:
@@ -783,6 +782,89 @@ python3 tools/check_simplex_vs_oracle.py --max-rows 250   # PASS: 30/30
 ./build/apps/sovereign-cli info  benchmarks/data/netlib_lp/forplan.mps --warnings
 ./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/brandy.mps
 ./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/grow22.mps --scale
+
+# ticket #7 — Farkas certificate + complementary slackness
+./build/tests/test_duals
 ```
 
-**Not yet testable:** the GPU continuous core (#8, #9) — needs a toolchain.
+**Not yet testable on this machine:** the GPU continuous core (#8, #9) — needs
+a toolchain. (A CUDA 12.4 toolkit + gcc-10 were provisioned, no root, on a
+separate RTX 2080 Ti machine to unblock ticket #3's CUDA backend — see §17.2 —
+but that machine is not this one and is not always available.)
+
+---
+
+## 17. Ticket #7 — Farkas/dual-ray & duals plumbing (Phase 2, M1 begins)
+
+### 17.1 What was built
+
+```
+include/sovereign/duals.hpp   FarkasCertificate, DualSolution
+src/l1/duals.cpp              the range-arithmetic certificate checker
+tests/test_duals.cpp          7 cases
+```
+
+`SimplexResult` gained a `FarkasCertificate farkas` field, populated whenever
+`solve()` returns `Infeasible` from a real Phase I search (not the trivial
+crossed-bounds-before-any-solve path, which has no basis to take a dual from).
+
+**The contract, not just the simplex's use of it.** The point of this ticket
+is a contract every continuous engine implements the same way — PDHG (#8) and
+the IPM (#9) populate the same `FarkasCertificate`/`DualSolution` shapes later,
+so Benders (#26) and conflict-cut derivation (#43) consume one interface
+regardless of which engine solved the subproblem.
+
+**The certificate is derived from scratch, not asserted.** For row multipliers
+`y`, the identity `sum_i y_i (Ax)_i == sum_j (A^T y)_j x_j` holds for *any* x.
+Bounding each side independently through the row bounds and the column bounds
+gives two ranges for the same quantity; if they don't overlap, no feasible x
+can exist. `FarkasCertificate::certifies_infeasibility()` computes both ranges
+and checks disjointness — an arithmetic proof, checkable without re-solving
+and without trusting whichever engine produced `y`. Worked by hand in
+`duals.hpp`'s own comment against the `tiny_infeasible` smoke fixture
+(`x >= 2, x <= 1`): `y = (1, -1)` forces row range `[1, ∞)` against column
+range `{0}` — disjoint, contradiction confirmed.
+
+**Where the simplex gets `y`.** At the point Phase I terminates with residual
+infeasibility, the Phase I dual (`price()`'s `duals_` side effect against the
+*live*, unfrozen Phase I cost — verified frozen-Bland state has already
+thawed by the time Phase I can return Optimal) is exactly this certificate.
+No new algorithm — this reads a value the simplex already computes internally
+and had never exposed.
+
+**`DualSolution::complementary_slackness_violation`** is the reusable form of
+the check `SimplexImpl::run()` already did informally: a row dual must be
+zero unless that row's activity sits at a bound, a reduced cost must be zero
+unless the column does. Takes the primal point, the duals, and the problem —
+engine-agnostic on purpose.
+
+### 17.2 GPU box provisioning (unblocks ticket #3's CUDA backend, no code change)
+
+Not part of ticket #7's own scope, but done in the same session: got SSH
+access to a machine with an RTX 2080 Ti and compiled `backend_cuda.cu` for
+the first time ever. Two real, non-obvious fixes, both committed:
+
+- `src/CMakeLists.txt`: `CUDA_RESOLVE_DEVICE_SYMBOLS ON` on `sovereign_l0`.
+  Needed because the library is `STATIC` with `CUDA_SEPARABLE_COMPILATION
+  ON`, and CMake does not device-link a static library's separable-compiled
+  objects unless something tells it to — a plain C++ executable (no `.cu`
+  sources of its own, like `sovereign-cli` or any test binary) linking
+  against it otherwise fails at the final link with undefined
+  `__cudaRegisterLinkedBinary_*` references.
+- `sovereignty.toml`: a scoped exception for `CUDA_cusolver_metis_static_LIBRARY`
+  in the resolved dependency graph. `find_package(CUDAToolkit)` caches a
+  variable for every optional library of every component it *can* find,
+  including cuSOLVER's optional METIS dependency, regardless of whether the
+  project asked for that component — this project links only `CUDA::cudart`,
+  `CUDA::cublas`, `CUDA::cusparse`. Confirmed by the actual link line before
+  adding the exception, scoped strictly to the synthetic `<depgraph>/` path.
+
+Both the CUDA toolkit (12.4) and a working host compiler (gcc-10, needed for
+`<span>` — the system default gcc 9.4's libstdc++ predates it) were installed
+to that machine's home directory with **no root**, via `apt-get download` +
+`dpkg-deb -x` for the compiler and the official runfile installer's
+`--toolkit`-only mode for CUDA. Verified there: `test_l0_backend` 21/21,
+`ctest` 13/13, sovereignty check clean including the resolved dependency
+graph. That machine is Turing (RTX 2080 Ti) — same 1/32-rate fp64 caveat as
+the GTX 1650 noted in §9: good for GPU *correctness* validation, not GPU
+*performance* claims, exactly as documented there.

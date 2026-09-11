@@ -29,6 +29,9 @@ sovereign_add_test(test_simplex    test_simplex.cpp)
 # Ticket #6 -- preconditioning.
 sovereign_add_test(test_scaling    test_scaling.cpp)
 
+# Ticket #7 -- Farkas/dual-ray & duals plumbing.
+sovereign_add_test(test_duals      test_duals.cpp)
+
 # Interface parity. On a machine with no CUDA/ROCm toolkit the GPU backends are
 # never compiled, so a change to the Backend interface would leave them behind
 # silently. This is the part of their correctness checkable without a GPU.
