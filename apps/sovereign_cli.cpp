@@ -12,7 +12,9 @@
 #include <iostream>
 #include <string>
 
+#include "sovereign/backend.hpp"
 #include "sovereign/io.hpp"
+#include "sovereign/pdhg.hpp"
 #include "sovereign/scaling.hpp"
 #include "sovereign/simplex.hpp"
 
@@ -29,12 +31,15 @@ int usage() {
         "options:\n"
         "  --json                   machine-readable output\n"
         "  --warnings               print reader warnings\n"
-        "  --max-iterations N       simplex iteration limit (default 1000000)\n"
-        "  --time-limit S           simplex time limit in seconds\n"
-        "  --refactor N             refactorize every N pivots (default 100)\n"
-        "  --bland                  force Bland's rule from the first iteration\n"
-        "  --scale                  Ruiz + Pock-Chambolle preconditioning before solving\n"
-        "  --verbose                per-phase progress\n");
+        "  --engine simplex|pdhg    which solve engine to use (default simplex)\n"
+        "  --max-iterations N       iteration limit (simplex default 1000000, pdhg 1000000)\n"
+        "  --time-limit S           time limit in seconds\n"
+        "  --refactor N             simplex: refactorize every N pivots (default 100)\n"
+        "  --bland                  simplex: force Bland's rule from the first iteration\n"
+        "  --scale                  simplex: Ruiz + Pock-Chambolle before solving (optional;\n"
+        "                           pdhg always applies it internally, mandatorily)\n"
+        "  --tolerance T            pdhg: first-order tolerance (default 1e-4)\n"
+        "  --verbose                per-phase / per-restart progress\n");
     return 2;
 }
 
@@ -173,6 +178,53 @@ int command_solve(const std::string& path, bool json, const sov::SimplexOptions&
         || result.status == sov::SolveStatus::Unbounded ? 0 : 1;
 }
 
+// Ticket #8 -- the GPU-native first-order engine, runnable here on the Host
+// backend today and on Cuda/Hip unchanged once a toolkit compiles them
+// (Bible Part III). Ruiz + Pock-Chambolle (#6) is applied internally and
+// mandatorily, unlike --scale above, which is an optional convenience for
+// the simplex.
+int command_solve_pdhg(const std::string& path, bool json, const sov::PdhgOptions& opt) {
+    const sov::ReadResult r = sov::read_model(path);
+    auto backend = sov::make_backend(sov::default_backend_kind());
+
+    sov::Pdhg pdhg(opt);
+    const sov::PdhgResult result = pdhg.solve(r.problem, *backend);
+
+    if (json) {
+        std::printf("{\n");
+        std::printf("  \"path\": \"%s\",\n", escape(path).c_str());
+        std::printf("  \"engine\": \"pdhg\",\n");
+        std::printf("  \"backend\": \"%s\",\n", sov::to_string(backend->kind()));
+        std::printf("  \"status\": \"%s\",\n", sov::to_string(result.status));
+        if (result.status == sov::PdhgStatus::Optimal)
+            std::printf("  \"objective\": %.17g,\n", result.objective);
+        else
+            std::printf("  \"objective\": null,\n");
+        std::printf("  \"iterations\": %lld,\n", static_cast<long long>(result.iterations));
+        std::printf("  \"restarts\": %lld,\n", static_cast<long long>(result.restarts));
+        std::printf("  \"seconds\": %.6f,\n", result.seconds);
+        std::printf("  \"primal_infeasibility\": %.17g,\n", result.primal_infeasibility);
+        std::printf("  \"dual_infeasibility\": %.17g,\n", result.dual_infeasibility);
+        std::printf("  \"message\": \"%s\"\n", escape(result.message).c_str());
+        std::printf("}\n");
+    } else {
+        std::printf("%s\n", r.problem.summary().c_str());
+        std::printf("engine      : pdhg (%s)\n", backend->device_description().data());
+        std::printf("status      : %s\n", sov::to_string(result.status));
+        if (result.status == sov::PdhgStatus::Optimal)
+            std::printf("objective   : %.12g\n", result.objective);
+        std::printf("iterations  : %lld", static_cast<long long>(result.iterations));
+        if (result.restarts > 0) std::printf("  (restarts: %lld)", static_cast<long long>(result.restarts));
+        std::printf("\n");
+        std::printf("residuals   : primal %.3g, dual %.3g\n",
+                    result.primal_infeasibility, result.dual_infeasibility);
+        std::printf("time        : %.3f s\n", result.seconds);
+        if (!result.message.empty())
+            std::printf("note        : %s\n", result.message.c_str());
+    }
+    return result.status == sov::PdhgStatus::Optimal ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -180,26 +232,41 @@ int main(int argc, char** argv) {
 
     const std::string command = argv[1];
     std::string path;
+    std::string engine = "simplex";
     bool json = false, warnings = false, scale = false;
     sov::SimplexOptions opt;
+    sov::PdhgOptions pdhg_opt;
 
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--json") json = true;
         else if (a == "--warnings") warnings = true;
-        else if (a == "--verbose") opt.verbose = true;
+        else if (a == "--verbose") { opt.verbose = true; pdhg_opt.verbose = true; }
         else if (a == "--bland") opt.always_bland = true;
         else if (a == "--scale") scale = true;
+        else if (a == "--engine" && i + 1 < argc) engine = argv[++i];
         else if (a == "--refactor" && i + 1 < argc) opt.refactor_frequency = std::stoi(argv[++i]);
-        else if (a == "--max-iterations" && i + 1 < argc) opt.max_iterations = std::stoll(argv[++i]);
-        else if (a == "--time-limit" && i + 1 < argc) opt.time_limit_seconds = std::stod(argv[++i]);
+        else if (a == "--max-iterations" && i + 1 < argc) {
+            opt.max_iterations = std::stoll(argv[i + 1]);
+            pdhg_opt.max_iterations = std::stoll(argv[++i]);
+        }
+        else if (a == "--time-limit" && i + 1 < argc) {
+            opt.time_limit_seconds = std::stod(argv[i + 1]);
+            pdhg_opt.time_limit_seconds = std::stod(argv[++i]);
+        }
+        else if (a == "--tolerance" && i + 1 < argc) pdhg_opt.tolerance = std::stod(argv[++i]);
         else if (!a.empty() && a[0] == '-') { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return usage(); }
         else path = a;
     }
     if (path.empty()) return usage();
+    if (engine != "simplex" && engine != "pdhg") {
+        std::fprintf(stderr, "unknown --engine '%s' (want simplex or pdhg)\n", engine.c_str());
+        return usage();
+    }
 
     try {
         if (command == "info") return command_info(path, json, warnings);
+        if (command == "solve" && engine == "pdhg") return command_solve_pdhg(path, json, pdhg_opt);
         if (command == "solve") return command_solve(path, json, opt, scale);
     } catch (const std::exception& e) {
         if (json) std::printf("{\"error\": \"%s\"}\n", escape(e.what()).c_str());

@@ -667,8 +667,9 @@ reason = "The Netlib LP readme records, for a handful of instances, a reference 
 [[exceptions]]
 token = "highs"
 paths = ["tools/oracle/**", "tools/check_parser_vs_oracle.py",
-         "tools/check_simplex_vs_oracle.py", "tests/test_oracle.py", "cmake/Oracle.cmake"]
-reason = "run_oracle.py spawns the HiGHS CLI as a subprocess and parses its output files; install_highs.sh builds that CLI into the excluded build-oracle/ path. The two check_*_vs_oracle harnesses (#5, #4) invoke the same CLI to diff our parser's shape and our simplex's objective against an independent reader/solver of the same bytes -- the Oracle rule in action. Never imported, never linked."
+         "tools/check_simplex_vs_oracle.py", "tools/check_pdhg_vs_oracle.py",
+         "tests/test_oracle.py", "cmake/Oracle.cmake"]
+reason = "run_oracle.py spawns the HiGHS CLI as a subprocess and parses its output files; install_highs.sh builds that CLI into the excluded build-oracle/ path. The check_*_vs_oracle harnesses (#5, #4, #8) invoke the same CLI to diff our parser's shape, our simplex's objective, and our PDHG engine's objective against an independent reader/solver of the same bytes -- the Oracle rule in action. Never imported, never linked."
 
 [[exceptions]]
 token = "cbc"

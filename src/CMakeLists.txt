@@ -23,6 +23,8 @@ add_library(sovereign_l0
   l1/scaling.cpp
   # Ticket #7 -- Farkas/dual-ray & duals plumbing.
   l1/duals.cpp
+  # Ticket #8 -- PDHG/PDLP engine.
+  l1/pdhg.cpp
 )
 
 target_include_directories(sovereign_l0

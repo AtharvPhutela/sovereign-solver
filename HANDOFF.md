@@ -742,8 +742,8 @@ local corpus (shell-archive packed format, skipped for M0).
 ## 15. Immediate next steps
 
 Phase 1 is done. Phase 2 — the GPU continuous core (M1) — is underway: #7
-(Farkas/duals plumbing) is built (§17); next is #8 (PDHG/PDLP), #9
-(pivoting-free IPM), #10 (the concurrent engine race).
+(Farkas/duals plumbing, §17) and #8 (PDHG/PDLP, §18) are built; next is #9
+(pivoting-free IPM), then #10 (the concurrent engine race).
 
 **This is where the missing toolchain finally bites.** #8 and #9 are GPU
 engines; there is no CUDA/ROCm and no BLAS on this machine (§9, §11.3). Options:
@@ -785,6 +785,11 @@ python3 tools/check_simplex_vs_oracle.py --max-rows 250   # PASS: 30/30
 
 # ticket #7 — Farkas certificate + complementary slackness
 ./build/tests/test_duals
+
+# ticket #8 — PDHG, on the Host backend (no GPU needed to validate the engine)
+./build/tests/test_pdhg
+./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/afiro.mps --engine pdhg
+python3 tools/check_pdhg_vs_oracle.py --max-rows 100 --timeout 30
 ```
 
 **Not yet testable on this machine:** the GPU continuous core (#8, #9) — needs
@@ -868,3 +873,106 @@ to that machine's home directory with **no root**, via `apt-get download` +
 graph. That machine is Turing (RTX 2080 Ti) — same 1/32-rate fp64 caveat as
 the GTX 1650 noted in §9: good for GPU *correctness* validation, not GPU
 *performance* claims, exactly as documented there.
+
+---
+
+## 18. Ticket #8 — PDHG / PDLP engine (Phase 2, M1)
+
+### 18.1 What was built
+
+```
+include/sovereign/pdhg.hpp   PdhgOptions, PdhgResult, Pdhg
+src/l1/pdhg.cpp               the iteration, step-size estimate, restarts
+tests/test_pdhg.cpp           7 cases
+tools/check_pdhg_vs_oracle.py oracle comparison at PDHG's own tolerance
+apps/sovereign_cli.cpp        `solve --engine pdhg`
+```
+
+Runs entirely through the L0 `Backend` abstraction (`DeviceCsr`/`DeviceBuffer`,
+`spmv`/`spmv_transpose`/`axpy`/`scale`/`project_box`/`dot`/`norm2`) — on this
+machine that means the Host backend, but nothing in the algorithm is
+Host-specific; the same code runs on Cuda once §17.2's toolkit is available
+to build with.
+
+**The derivation (pdhg.hpp carries the full version).** Introduce a slack
+`s := Ax` with the row bounds moved onto it, dualize the resulting equality
+with multiplier `y`, and apply Chambolle-Pock to the saddle point. The result
+is exactly "SpMV + elementwise clamp" per iteration:
+```
+x <- Proj_X( x - tau (c - A^T y) )
+s <- Proj_S( s - tau y )
+y <- y + sigma ( (2s-s_old) - A(2x-x_old) )
+```
+The sign convention (`c - A^T y`, not `c + A^T y`) was chosen deliberately to
+match ticket #7's `DualSolution` exactly, so PDHG's `y`/reduced costs need no
+translation before feeding #10's engine race or #26's Benders later — verified
+by a dedicated test (`reduced_costs_use_the_same_sign_convention_as_the_simplex`).
+
+**Step size is measured, not assumed.** Ruiz + Pock-Chambolle (#6) runs as
+the mandatory front-end Bible §6.2 requires, but Scaling's diagonal formula
+was derived for `A` alone and doesn't account for the slack block's identity
+column in the actual saddle-point operator `K = [-A | I]` — using it directly
+as a tau/sigma bound would be a hair optimistic. Instead `estimate_operator_norm`
+runs ~30 steps of power iteration on `K` itself, using the same `spmv`/
+`spmv_transpose` primitives as the main loop (no new Backend primitive
+needed), and `tau = sigma = 0.9 / ‖K‖_est`. Honest, and it costs a handful of
+extra SpMVs once at setup.
+
+**Restarts are real, not a stub.** A Cesaro average of `(x, y)` since the
+last restart is tracked; every `restart_check_period` iterations the average's
+KKT residual is compared against the residual at the last restart, and a
+sufficient decrease (default: half) triggers a restart to the average. Fires
+in practice — 6 restarts on `blend`, 1 on `sc50a`/`sc50b`, 6 on `share2b` —
+and in each case the run went on to actually converge, which is what "the
+restarts are what rescue it" (Bible §4.2 Engine A) has to mean in practice,
+not just that a counter increments.
+
+**Two real bugs caught before this shipped, both worth knowing about:**
+- *Scaled-space convergence checking was not enough.* Unscaling divides
+  column `j`'s reduced cost by `col_scale_j`; a residual safely under
+  tolerance in scaled space can land anywhere after unscaling depending on
+  how aggressive that column's scale factor was. Fixed by adding
+  `original_space_residual`, which unscales the *candidate* point and checks
+  it against the real problem before declaring convergence — scaled-space
+  `kkt_residual` is now used only for the restart decision, where a relative
+  comparison in a consistent space is all that's needed.
+- *The dual residual only ever checked columns.* A non-binding row's dual
+  must be ~0 at any true fixed point (a one-line argument from the `s`
+  update: an interior `s` forces `tau*y = 0`), but nothing was checking it —
+  so `blend`/`adlittle` could report "optimal" while `y` was still very wrong
+  on rows that weren't binding. Both residual functions now check the row
+  side too. `tests/test_duals.cpp` didn't need to change (ticket #7's
+  `DualSolution::complementary_slackness_violation` already checked rows
+  correctly) — this was specifically PDHG's own internal convergence check
+  that was incomplete, not the shared contract.
+
+### 18.2 Verification
+
+- `test_pdhg` — 7 hand-checked cases (mirroring `test_simplex.cpp`'s
+  discipline): a two-variable optimum, a lower-bound-forced optimum, an
+  equality row, a column-bound-forced optimum, a degenerate case, a
+  restart-firing case, and the sign-convention check above.
+- `check_pdhg_vs_oracle.py`: **10/13 Netlib instances agree with the oracle**
+  to 5e-3 relative / 1e-3 absolute (afiro, adlittle, blend, sc50a, sc50b,
+  scsd1, share2b, recipe, plus both feasible smoke instances). `adlittle`
+  needed ~394k iterations to actually reach tolerance, `share2b` ~774k —
+  both verified to get there, which is why `PdhgOptions::max_iterations`
+  defaults to 1,000,000, not the original 200,000.
+- **Two honest, tracked gaps, not hidden:** `kb2` still hasn't converged at
+  1,000,000 iterations (needs more — not yet quantified how many), and
+  `fit1d`/`fit2d` (25 rows, 1026/10500 columns — extremely wide) time out at
+  the check script's default 30s budget. Both are instances of PDHG's
+  documented slow tail (Bible §4.2 Engine A, §10.1), not a correctness
+  defect — every instance that *does* converge matches the oracle. Widening
+  `--timeout`/`--max-iterations` on these specific instances is a reasonable
+  next probe, not yet done.
+- **PDHG has no infeasibility or unbounded detection.** Both are caught at
+  the crossed-bounds level only (same as Simplex's trivial case); a genuinely
+  infeasible or unbounded LP handed to PDHG will exhaust its iteration budget
+  rather than terminate early with the right status. Named explicitly rather
+  than silently returned as `iteration_limit` with no explanation — tracked
+  as a real gap for whenever PDHG needs to stand fully on its own rather than
+  racing the simplex (#10).
+- `ctest`: 15/15. Sovereignty check: clean, including the resolved dependency
+  graph (`check_pdhg_vs_oracle.py` needed the same scoped `highs` exception
+  the other oracle-comparison scripts already have — added to its `paths`).
