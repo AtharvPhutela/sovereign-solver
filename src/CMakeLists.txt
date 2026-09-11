@@ -53,7 +53,17 @@ if(SOVEREIGN_WITH_CUDA)
   set_target_properties(sovereign_l0 PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_STANDARD 20
-    CUDA_STANDARD_REQUIRED ON)
+    CUDA_STANDARD_REQUIRED ON
+    # sovereign_l0 is STATIC, and CMake does not device-link a static library's
+    # separable-compilation objects by default -- it expects whatever consumes
+    # the library to do that. But most consumers here (sovereign-cli, the test
+    # binaries) are plain C++ targets with no .cu sources, so CMake never
+    # inserts that step for them and the final link fails on undefined
+    # __cudaRegisterLinkedBinary_*/cudaGetDeviceProperties_v2 symbols. Making
+    # the library resolve its own device symbols keeps every CUDA-aware
+    # decision inside this one CUDA-gated block, instead of pushing
+    # CUDA_RESOLVE_DEVICE_SYMBOLS onto every current and future consumer.
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     # `native` targets the card in the build machine; override with

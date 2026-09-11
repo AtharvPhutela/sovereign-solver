@@ -645,6 +645,12 @@ reason = "The ~250-line standalone C program from netlib.org/lp/data/emps.c that
 # the checker refuses to run on an unjustified exception.
 # ===========================================================================
 
+# --- CUDA toolkit probing: a cached variable for a component we never use ---
+[[exceptions]]
+token = "metis"
+paths = ["<depgraph>/CMakeCache.txt"]
+reason = "find_package(CUDAToolkit) caches a variable for every optional library of every CUDA component it can find on the system, including cuSOLVER's optional static METIS dependency (CUDA_cusolver_metis_static_LIBRARY), regardless of whether the project actually asked for that component. src/CMakeLists.txt links only CUDA::cudart, CUDA::cublas and CUDA::cusparse -- cuSOLVER is never requested, and nothing in this project ever links METIS outside src/l0/**. The cached path (/usr/lib/x86_64-linux-gnu/libmetis_static.a) is a system package on the build machine that CMake's probe happened to notice, not a dependency this project draws on. Confirmed by inspecting the actual link line: no cusolver, no metis. Scoped strictly to the synthetic <depgraph>/CMakeCache.txt path so a real METIS reference in source or a manifest still fails as before."
+
 [[exceptions]]
 token = "cplex"
 paths = ["benchmarks/fetch_corpus.py", "benchmarks/data/**"]
