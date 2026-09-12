@@ -27,7 +27,13 @@ add_library(sovereign_l0
   l1/pdhg.cpp
   # Ticket #9 -- regularized pivoting-free IPM.
   l1/ipm.cpp
+  # Ticket #10 -- the concurrent engine race.
+  l1/race.cpp
 )
+
+# Ticket #10 needs real threads (std::thread, not just <thread>'s declarations).
+find_package(Threads REQUIRED)
+target_link_libraries(sovereign_l0 PUBLIC Threads::Threads)
 
 target_include_directories(sovereign_l0
   PUBLIC "${CMAKE_SOURCE_DIR}/include")

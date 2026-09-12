@@ -19,6 +19,7 @@ const char* to_string(PdhgStatus s) noexcept {
         case PdhgStatus::TimeLimit:        return "time_limit";
         case PdhgStatus::NumericalFailure: return "numerical_failure";
         case PdhgStatus::NotSolved:        return "not_solved";
+        case PdhgStatus::Cancelled:        return "cancelled";
     }
     return "unknown";
 }
@@ -197,7 +198,8 @@ Real original_space_residual(const Problem& problem, Real obj_sign, const Scalin
 
 }  // namespace
 
-PdhgResult Pdhg::solve(const Problem& problem, Backend& backend) const {
+PdhgResult Pdhg::solve(const Problem& problem, Backend& backend,
+                       const CancellationToken* cancel) const {
     PdhgResult result;
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -266,6 +268,7 @@ PdhgResult Pdhg::solve(const Problem& problem, Backend& backend) const {
     bool converged = false;
 
     for (result.iterations = 0; result.iterations < options_.max_iterations; ++result.iterations) {
+        if (cancel != nullptr && cancel->is_cancelled()) { result.status = PdhgStatus::Cancelled; break; }
         if (options_.time_limit_seconds > 0.0) {
             const double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - t0).count();
@@ -378,17 +381,21 @@ PdhgResult Pdhg::solve(const Problem& problem, Backend& backend) const {
         }
     }
 
-    if (!converged && result.status == PdhgStatus::NotSolved) {
-        // Ran out of iterations (or time, handled above) without reaching
-        // tolerance: report the best point seen, but the status says so.
-        if (best_x_scaled.empty()) {
-            best_x_scaled = x.to_host();
-            best_y_scaled = y.to_host();
-        }
-        if (result.status == PdhgStatus::NotSolved) result.status = PdhgStatus::IterationLimit;
-    } else if (converged) {
-        result.status = PdhgStatus::Optimal;
+    // Populating the reported point is NOT conditional on which status we
+    // ended up with -- it must happen whenever the convergence check never
+    // fired, whatever stopped the loop. An earlier version only did this
+    // inside the "ran out of iterations" branch, so TimeLimit and Cancelled
+    // (both of which can fire before iteration 0's own restart-check period
+    // elapses -- e.g. a time budget consumed by setup on a large instance,
+    // or an immediate race cancellation) left best_x_scaled empty, and the
+    // unscale call below threw a dimension mismatch instead of reporting a
+    // (loss-worthy, but not crash-worthy) partial result.
+    if (best_x_scaled.empty()) {
+        best_x_scaled = x.to_host();
+        best_y_scaled = y.to_host();
     }
+    if (converged) result.status = PdhgStatus::Optimal;
+    else if (result.status == PdhgStatus::NotSolved) result.status = PdhgStatus::IterationLimit;
 
     // -- unscale back to the ORIGINAL problem's units and sense -------------
     std::vector<Real> x_original = best_x_scaled;

@@ -39,6 +39,7 @@ const char* to_string(SolveStatus s) noexcept {
         case SolveStatus::TimeLimit:        return "time_limit";
         case SolveStatus::NumericalFailure: return "numerical_failure";
         case SolveStatus::NotSolved:        return "not_solved";
+        case SolveStatus::Cancelled:        return "cancelled";
     }
     return "unknown";
 }
@@ -194,8 +195,8 @@ private:
 
 class SimplexImpl {
 public:
-    SimplexImpl(const Problem& p, const SimplexOptions& opt)
-        : problem_(p), opt_(opt),
+    SimplexImpl(const Problem& p, const SimplexOptions& opt, const CancellationToken* cancel)
+        : problem_(p), opt_(opt), cancel_(cancel),
           n_(p.num_cols()), m_(p.num_rows()), total_(p.num_cols() + p.num_rows()),
           csc_(p.matrix().to_csc()),
           factor_(p.num_rows()) {}
@@ -221,6 +222,7 @@ private:
 
     const Problem& problem_;
     SimplexOptions opt_;
+    const CancellationToken* cancel_;
     Idx n_, m_, total_;
     CscMatrix csc_;
     BasisFactorization factor_;
@@ -645,6 +647,7 @@ SolveStatus SimplexImpl::iterate(bool phase1, long long* iterations) {
     };
 
     while (true) {
+        if (cancel_ != nullptr && cancel_->is_cancelled()) return SolveStatus::Cancelled;
         if (opt_.max_iterations > 0 && result_.iterations >= opt_.max_iterations)
             return SolveStatus::IterationLimit;
         if (opt_.time_limit_seconds > 0.0) {
@@ -974,11 +977,11 @@ SimplexResult SimplexImpl::run() {
 
 }  // namespace
 
-SimplexResult Simplex::solve(const Problem& problem) {
+SimplexResult Simplex::solve(const Problem& problem, const CancellationToken* cancel) {
     std::string why;
     if (problem.validate(&why) != Status::Ok)
         throw Error("Simplex::solve was handed an invalid problem: " + why);
-    SimplexImpl impl(problem, options_);
+    SimplexImpl impl(problem, options_, cancel);
     return impl.run();
 }
 

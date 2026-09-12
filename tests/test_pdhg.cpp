@@ -122,4 +122,28 @@ TEST(pdhg, reduced_costs_use_the_same_sign_convention_as_the_simplex) {
     CHECK(r.reduced_costs[0] < 1e-3);
 }
 
+TEST(pdhg, a_time_limit_before_the_first_restart_check_still_reports_a_point) {
+    // Regression test for a real bug (found via ticket #10's engine race on
+    // a large real instance, maros-r7): the "best iterate seen" fallback was
+    // only populated inside the "ran out of iterations" branch, so a
+    // TimeLimit (or Cancelled) that fired before iteration 0 ever reached a
+    // restart-check point left best_x_scaled empty -- and the final unscale
+    // call threw a dimension mismatch instead of returning a legitimate
+    // partial result. A near-zero time limit reproduces the exact edge case:
+    // zero iterations completed, status still has to come back cleanly.
+    PdhgOptions opt;
+    opt.time_limit_seconds = 1e-9;
+    const char* text = R"(Maximize
+ obj: x + y
+Subject To
+ c1: x + 2 y <= 4
+ c2: 4 x + 2 y <= 12
+End
+)";
+    const PdhgResult r = solve_lp(text, opt);
+    CHECK(r.status == PdhgStatus::TimeLimit);
+    CHECK(r.iterations == 0);
+    CHECK(static_cast<Idx>(r.primal.size()) == 2);   // reported, not left empty
+}
+
 TST_MAIN()

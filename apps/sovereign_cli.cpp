@@ -16,6 +16,7 @@
 #include "sovereign/io.hpp"
 #include "sovereign/ipm.hpp"
 #include "sovereign/pdhg.hpp"
+#include "sovereign/race.hpp"
 #include "sovereign/scaling.hpp"
 #include "sovereign/simplex.hpp"
 
@@ -32,14 +33,15 @@ int usage() {
         "options:\n"
         "  --json                   machine-readable output\n"
         "  --warnings               print reader warnings\n"
-        "  --engine simplex|pdhg|ipm  which solve engine to use (default simplex)\n"
-        "  --max-iterations N       iteration limit (simplex 1000000, pdhg 1000000, ipm 200)\n"
-        "  --time-limit S           time limit in seconds\n"
+        "  --engine simplex|pdhg|ipm|race  which solve engine to use (default simplex)\n"
+        "  --max-iterations N       iteration limit (simplex 1000000, pdhg 1000000, ipm 1500)\n"
+        "  --time-limit S           time limit in seconds (race: shared budget per entrant)\n"
         "  --refactor N             simplex: refactorize every N pivots (default 100)\n"
         "  --bland                  simplex: force Bland's rule from the first iteration\n"
         "  --scale                  simplex: Ruiz + Pock-Chambolle before solving (optional;\n"
         "                           pdhg/ipm always apply it internally, mandatorily)\n"
         "  --tolerance T            pdhg (default 1e-4) / ipm (default 5e-8) tolerance\n"
+        "  --no-simplex/--no-pdhg/--no-ipm   race: exclude an entrant\n"
         "  --verbose                per-phase / per-restart progress\n");
     return 2;
 }
@@ -268,6 +270,46 @@ int command_solve_ipm(const std::string& path, bool json, const sov::IpmOptions&
     return result.status == sov::IpmStatus::Optimal ? 0 : 1;
 }
 
+// Ticket #10 -- races simplex, pdhg, and ipm on the same model; the first to
+// a valid terminal answer wins, the rest are cancelled and joined before this
+// returns (race.hpp's own contract).
+int command_solve_race(const std::string& path, bool json, const sov::RaceOptions& opt) {
+    const sov::ReadResult r = sov::read_model(path);
+    const sov::RaceResult result = sov::race_solve(r.problem, opt);
+
+    if (json) {
+        std::printf("{\n");
+        std::printf("  \"path\": \"%s\",\n", escape(path).c_str());
+        std::printf("  \"engine\": \"race\",\n");
+        std::printf("  \"has_winner\": %s,\n", result.has_winner ? "true" : "false");
+        std::printf("  \"winner\": %s,\n",
+                    result.has_winner ? ("\"" + std::string(sov::to_string(result.winner)) + "\"").c_str()
+                                       : "null");
+        std::printf("  \"status\": \"%s\",\n", escape(result.status).c_str());
+        if (result.has_winner)
+            std::printf("  \"objective\": %.17g,\n", result.objective);
+        else
+            std::printf("  \"objective\": null,\n");
+        std::printf("  \"seconds\": %.6f,\n", result.seconds);
+        std::printf("  \"engines_launched\": %d,\n", result.engines_launched);
+        std::printf("  \"message\": \"%s\"\n", escape(result.message).c_str());
+        std::printf("}\n");
+    } else {
+        std::printf("%s\n", r.problem.summary().c_str());
+        std::printf("engine      : race (%d launched)\n", result.engines_launched);
+        if (result.has_winner) {
+            std::printf("winner      : %s\n", sov::to_string(result.winner));
+            std::printf("status      : %s\n", result.status.c_str());
+            std::printf("objective   : %.12g\n", result.objective);
+        } else {
+            std::printf("winner      : none\n");
+            std::printf("note        : %s\n", result.message.c_str());
+        }
+        std::printf("time        : %.3f s\n", result.seconds);
+    }
+    return result.has_winner ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -280,6 +322,7 @@ int main(int argc, char** argv) {
     sov::SimplexOptions opt;
     sov::PdhgOptions pdhg_opt;
     sov::IpmOptions ipm_opt;
+    sov::RaceOptions race_opt;
 
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -298,18 +341,22 @@ int main(int argc, char** argv) {
         else if (a == "--time-limit" && i + 1 < argc) {
             opt.time_limit_seconds = std::stod(argv[i + 1]);
             pdhg_opt.time_limit_seconds = std::stod(argv[i + 1]);
-            ipm_opt.time_limit_seconds = std::stod(argv[++i]);
+            ipm_opt.time_limit_seconds = std::stod(argv[i + 1]);
+            race_opt.time_limit_seconds = std::stod(argv[++i]);
         }
         else if (a == "--tolerance" && i + 1 < argc) {
             pdhg_opt.tolerance = std::stod(argv[i + 1]);
             ipm_opt.tolerance = std::stod(argv[++i]);
         }
+        else if (a == "--no-simplex") race_opt.use_simplex = false;
+        else if (a == "--no-pdhg") race_opt.use_pdhg = false;
+        else if (a == "--no-ipm") race_opt.use_ipm = false;
         else if (!a.empty() && a[0] == '-') { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return usage(); }
         else path = a;
     }
     if (path.empty()) return usage();
-    if (engine != "simplex" && engine != "pdhg" && engine != "ipm") {
-        std::fprintf(stderr, "unknown --engine '%s' (want simplex, pdhg, or ipm)\n", engine.c_str());
+    if (engine != "simplex" && engine != "pdhg" && engine != "ipm" && engine != "race") {
+        std::fprintf(stderr, "unknown --engine '%s' (want simplex, pdhg, ipm, or race)\n", engine.c_str());
         return usage();
     }
 
@@ -317,6 +364,7 @@ int main(int argc, char** argv) {
         if (command == "info") return command_info(path, json, warnings);
         if (command == "solve" && engine == "pdhg") return command_solve_pdhg(path, json, pdhg_opt);
         if (command == "solve" && engine == "ipm") return command_solve_ipm(path, json, ipm_opt);
+        if (command == "solve" && engine == "race") return command_solve_race(path, json, race_opt);
         if (command == "solve") return command_solve(path, json, opt, scale);
     } catch (const std::exception& e) {
         if (json) std::printf("{\"error\": \"%s\"}\n", escape(e.what()).c_str());

@@ -19,6 +19,7 @@ const char* to_string(IpmStatus s) noexcept {
         case IpmStatus::TimeLimit:        return "time_limit";
         case IpmStatus::NumericalFailure: return "numerical_failure";
         case IpmStatus::NotSolved:        return "not_solved";
+        case IpmStatus::Cancelled:        return "cancelled";
     }
     return "unknown";
 }
@@ -92,7 +93,7 @@ private:
 
 }  // namespace
 
-IpmResult Ipm::solve(const Problem& problem) const {
+IpmResult Ipm::solve(const Problem& problem, const CancellationToken* cancel) const {
     IpmResult result;
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -254,6 +255,7 @@ IpmResult Ipm::solve(const Problem& problem) const {
     std::vector<Real> best_z, best_y;
 
     for (result.iterations = 0; result.iterations < options_.max_iterations; ++result.iterations) {
+        if (cancel != nullptr && cancel->is_cancelled()) { result.status = IpmStatus::Cancelled; break; }
         if (options_.time_limit_seconds > 0.0) {
             const double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - t0).count();

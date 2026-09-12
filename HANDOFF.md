@@ -742,8 +742,12 @@ local corpus (shell-archive packed format, skipped for M0).
 ## 15. Immediate next steps
 
 Phase 1 is done. Phase 2 — the GPU continuous core (M1) — has #7 (§17), #8
-(§18), and #9 (§19) built; next is #10 (the concurrent engine race), which
-already has three engines to race now.
+(§18), #9 (§19), and #10 (§20) built: three engines solve LPs, race each
+other, and agree with the oracle on this machine's Host backend. **M1's own
+gate is not yet closed** — it also names "beat CPU wall-clock on a
+large-network instance," which needs a real GPU run to mean anything (§9,
+§17.2); everything checkable without one is green. Phase 3 (crossover,
+#11/#12) is next.
 
 **This is where the missing toolchain finally bites.** #8 and #9 are GPU
 engines; there is no CUDA/ROCm and no BLAS on this machine (§9, §11.3). Options:
@@ -795,6 +799,10 @@ python3 tools/check_pdhg_vs_oracle.py --max-rows 100 --timeout 30
 ./build/tests/test_ipm
 ./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/afiro.mps --engine ipm
 python3 tools/check_ipm_vs_oracle.py --timeout 60
+
+# ticket #10 — the concurrent engine race
+./build/tests/test_race
+./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/afiro.mps --engine race
 ```
 
 **Not yet testable on this machine:** the GPU continuous core (#8, #9) — needs
@@ -1098,3 +1106,108 @@ on real Netlib instances, not by inspection:
 - `ctest`: 16/16. Sovereignty check clean, including the resolved dependency
   graph (`check_ipm_vs_oracle.py` added to the `highs` exception's `paths`,
   same pattern as the other oracle-comparison scripts).
+
+---
+
+## 20. Ticket #10 — the concurrent engine race (Phase 2, M1)
+
+### 20.1 What was built
+
+```
+include/sovereign/cancellation.hpp   CancellationToken (shared by all 3 engines)
+include/sovereign/race.hpp           RaceOptions, RaceResult, race_solve
+src/l1/race.cpp                      the harness itself
+tests/test_race.cpp                  7 cases
+apps/sovereign_cli.cpp               `solve --engine race` (+ --no-simplex/-pdhg/-ipm)
+```
+
+**Cooperative cancellation, added to all three existing engines.** Each of
+`SolveStatus`, `PdhgStatus`, `IpmStatus` gained a `Cancelled` value, and
+`Simplex::solve` / `Pdhg::solve` / `Ipm::solve` all gained an optional
+`const CancellationToken*` checked once per pivot/iteration — a single
+atomic load, negligible next to an SpMV or a dense factorization. This is
+deliberately minimal surgery on three already-tested engines rather than a
+parallel "cancellable" code path: same algorithm, same tests, one extra
+early-exit check.
+
+**The harness (race.hpp carries the full design rationale).** Launches every
+enabled engine on the same `Problem` in its own thread, each with its own
+`CancellationToken`. The first engine to reach a status this harness
+actually trusts — "valid" is checked per engine against what it can promise
+(`Optimal`/`Infeasible`/`Unbounded` for Simplex, `Optimal` only for
+PDHG/IPM, since neither has infeasibility or unbounded detection yet) —
+cancels every other entrant's token and becomes the winner. Every launched
+thread is joined before `race_solve` returns, win or lose, so "clean
+cancellation" (Build Map #10's own "Watch out") means what it says: no
+dangling threads, no leaked state, by construction rather than by
+convention.
+
+**Built general on purpose**, per the ticket's own explicit ask ("reused
+verbatim by the decomposition race #25"): the harness only needs an engine
+to accept a `CancellationToken`, report a status this harness can check for
+trustworthiness, and expose objective/primal/dual in a common shape.
+Nothing here assumes the three contestants are simplex/PDHG/IPM specifically.
+
+### 20.2 Two real bugs caught by testing this concurrently, not by inspection
+
+1. **A genuine data race, caught by ThreadSanitizer.** `shared.remaining`
+   and `shared.launched` were incremented in the main thread right before
+   launching each worker, unlocked — race.cpp's very first version. If an
+   already-launched worker finished and called `report()` (which decrements
+   `shared.remaining` *under* the mutex) before the main thread reached the
+   next iteration of its launch loop, the two writes raced. Building and
+   running `test_race` under `-fsanitize=thread` caught this immediately
+   (two independent data races reported, both at this exact spot); a plain
+   build and even five repeated normal runs showed nothing, because the
+   race window is narrow and machine-dependent. Fixed by computing both
+   counts once, in full, before any thread exists — there is no longer
+   anything for the main thread to touch after launch. Re-verified clean
+   under TSan across three fresh runs after the fix.
+2. **A dimension-mismatch crash on a real large instance, unrelated to
+   concurrency.** Racing `maros-r7` (3136 rows, 9408 cols — over both
+   Simplex's and IPM's dense-size caps, see below) with a tight time budget
+   surfaced a genuine bug in PDHG (#8) itself: `best_x_scaled`/`best_y_scaled`
+   (the best-iterate tracking added to fix ticket #8's own `adlittle`
+   overshoot, HANDOFF §18) were only ever populated inside the "ran out of
+   iterations" branch. A `TimeLimit` or `Cancelled` status that fires before
+   iteration 0 reaches its first restart-check point (plausible on a big
+   instance: setup costs like the power-iteration operator-norm estimate can
+   themselves consume the whole budget) skipped that branch entirely, left
+   both vectors empty, and the final `Scaling::unscale_primal` call threw a
+   dimension-mismatch exception instead of returning a legitimate partial
+   result. Fixed by decoupling "populate the reported point" from which
+   status the loop exited with — it now always runs, and the status
+   (`Optimal` / `IterationLimit` / whatever the loop already set) is decided
+   separately. Regression test: `pdhg.a_time_limit_before_the_first_restart_
+   check_still_reports_a_point`, using a `1e-9` second time limit to
+   reproduce the exact zero-iterations edge case deterministically rather
+   than depending on a slow machine or a large instance.
+
+### 20.3 Verification
+
+- `test_race` — 7 cases: a hand-verified optimum, an infeasible model
+  (checking that Simplex's `Infeasible` counts as a *win*, not a loss, since
+  PDHG/IPM can never produce one), an unbounded model likewise, a degenerate
+  small instance, disabling every engine (reported cleanly, not hung),
+  disabling two engines, and 20 repeated races back-to-back as practical
+  evidence nothing leaks between calls.
+- Clean under `-fsanitize=thread` (3 fresh runs, 0 warnings) after the fix
+  in §20.2.1 above.
+- `sovereign-cli solve <model> --engine race` on `afiro`: **Simplex wins**
+  (small, well-conditioned — matches the Build Map's own "the degenerate
+  small one may be won by simplex").
+- **The "huge instance" half of the Build Map's Test step is mechanically
+  demonstrated, not fully demonstrated end to end.** On `dfl001` (6071 rows)
+  and `maros-r7` (3136 rows, 9408 cols), Simplex and IPM both correctly and
+  immediately refuse via their own documented dense-size guards (`iterations:
+  0`, a clear message) — the architectural claim ("the engine built for
+  scale is the one left standing") holds exactly as designed. But PDHG,
+  running single-threaded on the Host backend with no GPU on this machine,
+  did not reach `Optimal` on either within a 45-120s budget — so the race
+  correctly reports "no valid winner" rather than a wrong one, but does not
+  positively demonstrate a PDHG *win* on a huge instance here. This is the
+  same gap already named in §9/§17.2: the o9 Solutions precedent this
+  project's whole strategic bet rests on (Bible Part II) is specifically
+  about GPU wall-clock, and a CPU simulation of PDHG's iteration is not
+  that. Revisit once GPU access is available again.
+- `ctest`: 17/17. Sovereignty check clean.

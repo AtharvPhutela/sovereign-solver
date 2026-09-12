@@ -63,6 +63,7 @@
 #include <vector>
 
 #include "sovereign/backend.hpp"
+#include "sovereign/cancellation.hpp"
 #include "sovereign/duals.hpp"
 #include "sovereign/numeric.hpp"
 #include "sovereign/problem.hpp"
@@ -75,6 +76,7 @@ enum class PdhgStatus {
     TimeLimit,
     NumericalFailure,
     NotSolved,
+    Cancelled,   ///< a CancellationToken fired (ticket #10's engine race)
 };
 
 const char* to_string(PdhgStatus s) noexcept;
@@ -142,7 +144,11 @@ public:
     /// Solve the continuous relaxation on `backend`. Integrality is ignored,
     /// same convention as Simplex::solve. `backend` may be Host today or
     /// Cuda/Hip once compiled -- the algorithm is identical either way.
-    PdhgResult solve(const Problem& problem, Backend& backend) const;
+    /// `cancel`, if given, is checked at the same cadence as the restart
+    /// decision (ticket #10's engine race) -- a set token returns
+    /// PdhgStatus::Cancelled promptly.
+    PdhgResult solve(const Problem& problem, Backend& backend,
+                     const CancellationToken* cancel = nullptr) const;
 
     const PdhgOptions& options() const noexcept { return options_; }
 

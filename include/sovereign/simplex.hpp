@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "sovereign/cancellation.hpp"
 #include "sovereign/duals.hpp"
 #include "sovereign/numeric.hpp"
 #include "sovereign/problem.hpp"
@@ -43,6 +44,7 @@ enum class SolveStatus {
     TimeLimit,
     NumericalFailure,
     NotSolved,
+    Cancelled,   ///< a CancellationToken fired (ticket #10's engine race)
 };
 
 const char* to_string(SolveStatus s) noexcept;
@@ -119,7 +121,10 @@ public:
 
     /// Solve the continuous relaxation. Integrality is ignored -- branch and
     /// bound is ticket #38; here an integer column is just a bounded one.
-    SimplexResult solve(const Problem& problem);
+    /// `cancel`, if given, is checked once per pivot (ticket #10's engine
+    /// race) -- a set token returns SolveStatus::Cancelled promptly rather
+    /// than continuing to pivot toward an answer nobody will read.
+    SimplexResult solve(const Problem& problem, const CancellationToken* cancel = nullptr);
 
     const SimplexOptions& options() const noexcept { return options_; }
 

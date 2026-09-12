@@ -56,6 +56,7 @@
 #include <string>
 #include <vector>
 
+#include "sovereign/cancellation.hpp"
 #include "sovereign/duals.hpp"
 #include "sovereign/numeric.hpp"
 #include "sovereign/problem.hpp"
@@ -68,6 +69,7 @@ enum class IpmStatus {
     TimeLimit,
     NumericalFailure,
     NotSolved,
+    Cancelled,   ///< a CancellationToken fired (ticket #10's engine race)
 };
 
 const char* to_string(IpmStatus s) noexcept;
@@ -130,7 +132,10 @@ public:
     /// factorization here is dense CPU linear algebra (see ipm.hpp's top
     /// comment on scope) -- there is no GPU path for it yet, unlike PDHG,
     /// which is why this does not take a Backend the way Pdhg::solve does.
-    IpmResult solve(const Problem& problem) const;
+    /// `cancel`, if given, is checked once per outer iteration (ticket #10's
+    /// engine race) -- a set token returns IpmStatus::Cancelled promptly,
+    /// before starting the next dense factorization rather than mid-solve.
+    IpmResult solve(const Problem& problem, const CancellationToken* cancel = nullptr) const;
 
     const IpmOptions& options() const noexcept { return options_; }
 
