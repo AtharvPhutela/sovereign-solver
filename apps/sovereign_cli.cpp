@@ -14,6 +14,7 @@
 
 #include "sovereign/backend.hpp"
 #include "sovereign/io.hpp"
+#include "sovereign/ipm.hpp"
 #include "sovereign/pdhg.hpp"
 #include "sovereign/scaling.hpp"
 #include "sovereign/simplex.hpp"
@@ -31,14 +32,14 @@ int usage() {
         "options:\n"
         "  --json                   machine-readable output\n"
         "  --warnings               print reader warnings\n"
-        "  --engine simplex|pdhg    which solve engine to use (default simplex)\n"
-        "  --max-iterations N       iteration limit (simplex default 1000000, pdhg 1000000)\n"
+        "  --engine simplex|pdhg|ipm  which solve engine to use (default simplex)\n"
+        "  --max-iterations N       iteration limit (simplex 1000000, pdhg 1000000, ipm 200)\n"
         "  --time-limit S           time limit in seconds\n"
         "  --refactor N             simplex: refactorize every N pivots (default 100)\n"
         "  --bland                  simplex: force Bland's rule from the first iteration\n"
         "  --scale                  simplex: Ruiz + Pock-Chambolle before solving (optional;\n"
-        "                           pdhg always applies it internally, mandatorily)\n"
-        "  --tolerance T            pdhg: first-order tolerance (default 1e-4)\n"
+        "                           pdhg/ipm always apply it internally, mandatorily)\n"
+        "  --tolerance T            pdhg (default 1e-4) / ipm (default 5e-8) tolerance\n"
         "  --verbose                per-phase / per-restart progress\n");
     return 2;
 }
@@ -225,6 +226,48 @@ int command_solve_pdhg(const std::string& path, bool json, const sov::PdhgOption
     return result.status == sov::PdhgStatus::Optimal ? 0 : 1;
 }
 
+// Ticket #9 -- the high-precision engine: Ruiz + Pock-Chambolle (#6) is
+// applied internally and mandatorily here too, same as pdhg. Runs on the
+// host only (dense SQD LDL^T -- see ipm.hpp's scope note); there is no
+// --backend choice the way pdhg has one.
+int command_solve_ipm(const std::string& path, bool json, const sov::IpmOptions& opt) {
+    const sov::ReadResult r = sov::read_model(path);
+
+    sov::Ipm ipm(opt);
+    const sov::IpmResult result = ipm.solve(r.problem);
+
+    if (json) {
+        std::printf("{\n");
+        std::printf("  \"path\": \"%s\",\n", escape(path).c_str());
+        std::printf("  \"engine\": \"ipm\",\n");
+        std::printf("  \"status\": \"%s\",\n", sov::to_string(result.status));
+        if (result.status == sov::IpmStatus::Optimal)
+            std::printf("  \"objective\": %.17g,\n", result.objective);
+        else
+            std::printf("  \"objective\": null,\n");
+        std::printf("  \"iterations\": %d,\n", result.iterations);
+        std::printf("  \"seconds\": %.6f,\n", result.seconds);
+        std::printf("  \"primal_infeasibility\": %.17g,\n", result.primal_infeasibility);
+        std::printf("  \"dual_infeasibility\": %.17g,\n", result.dual_infeasibility);
+        std::printf("  \"complementarity_gap\": %.17g,\n", result.complementarity_gap);
+        std::printf("  \"message\": \"%s\"\n", escape(result.message).c_str());
+        std::printf("}\n");
+    } else {
+        std::printf("%s\n", r.problem.summary().c_str());
+        std::printf("engine      : ipm (dense SQD LDL^T, host)\n");
+        std::printf("status      : %s\n", sov::to_string(result.status));
+        if (result.status == sov::IpmStatus::Optimal)
+            std::printf("objective   : %.12g\n", result.objective);
+        std::printf("iterations  : %d\n", result.iterations);
+        std::printf("residuals   : primal %.3g, dual %.3g, gap %.3g\n",
+                    result.primal_infeasibility, result.dual_infeasibility, result.complementarity_gap);
+        std::printf("time        : %.3f s\n", result.seconds);
+        if (!result.message.empty())
+            std::printf("note        : %s\n", result.message.c_str());
+    }
+    return result.status == sov::IpmStatus::Optimal ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -236,37 +279,44 @@ int main(int argc, char** argv) {
     bool json = false, warnings = false, scale = false;
     sov::SimplexOptions opt;
     sov::PdhgOptions pdhg_opt;
+    sov::IpmOptions ipm_opt;
 
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--json") json = true;
         else if (a == "--warnings") warnings = true;
-        else if (a == "--verbose") { opt.verbose = true; pdhg_opt.verbose = true; }
+        else if (a == "--verbose") { opt.verbose = true; pdhg_opt.verbose = true; ipm_opt.verbose = true; }
         else if (a == "--bland") opt.always_bland = true;
         else if (a == "--scale") scale = true;
         else if (a == "--engine" && i + 1 < argc) engine = argv[++i];
         else if (a == "--refactor" && i + 1 < argc) opt.refactor_frequency = std::stoi(argv[++i]);
         else if (a == "--max-iterations" && i + 1 < argc) {
             opt.max_iterations = std::stoll(argv[i + 1]);
-            pdhg_opt.max_iterations = std::stoll(argv[++i]);
+            pdhg_opt.max_iterations = std::stoll(argv[i + 1]);
+            ipm_opt.max_iterations = std::stoi(argv[++i]);
         }
         else if (a == "--time-limit" && i + 1 < argc) {
             opt.time_limit_seconds = std::stod(argv[i + 1]);
-            pdhg_opt.time_limit_seconds = std::stod(argv[++i]);
+            pdhg_opt.time_limit_seconds = std::stod(argv[i + 1]);
+            ipm_opt.time_limit_seconds = std::stod(argv[++i]);
         }
-        else if (a == "--tolerance" && i + 1 < argc) pdhg_opt.tolerance = std::stod(argv[++i]);
+        else if (a == "--tolerance" && i + 1 < argc) {
+            pdhg_opt.tolerance = std::stod(argv[i + 1]);
+            ipm_opt.tolerance = std::stod(argv[++i]);
+        }
         else if (!a.empty() && a[0] == '-') { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return usage(); }
         else path = a;
     }
     if (path.empty()) return usage();
-    if (engine != "simplex" && engine != "pdhg") {
-        std::fprintf(stderr, "unknown --engine '%s' (want simplex or pdhg)\n", engine.c_str());
+    if (engine != "simplex" && engine != "pdhg" && engine != "ipm") {
+        std::fprintf(stderr, "unknown --engine '%s' (want simplex, pdhg, or ipm)\n", engine.c_str());
         return usage();
     }
 
     try {
         if (command == "info") return command_info(path, json, warnings);
         if (command == "solve" && engine == "pdhg") return command_solve_pdhg(path, json, pdhg_opt);
+        if (command == "solve" && engine == "ipm") return command_solve_ipm(path, json, ipm_opt);
         if (command == "solve") return command_solve(path, json, opt, scale);
     } catch (const std::exception& e) {
         if (json) std::printf("{\"error\": \"%s\"}\n", escape(e.what()).c_str());

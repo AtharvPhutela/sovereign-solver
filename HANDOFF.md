@@ -741,9 +741,9 @@ local corpus (shell-archive packed format, skipped for M0).
 
 ## 15. Immediate next steps
 
-Phase 1 is done. Phase 2 — the GPU continuous core (M1) — is underway: #7
-(Farkas/duals plumbing, §17) and #8 (PDHG/PDLP, §18) are built; next is #9
-(pivoting-free IPM), then #10 (the concurrent engine race).
+Phase 1 is done. Phase 2 — the GPU continuous core (M1) — has #7 (§17), #8
+(§18), and #9 (§19) built; next is #10 (the concurrent engine race), which
+already has three engines to race now.
 
 **This is where the missing toolchain finally bites.** #8 and #9 are GPU
 engines; there is no CUDA/ROCm and no BLAS on this machine (§9, §11.3). Options:
@@ -790,6 +790,11 @@ python3 tools/check_simplex_vs_oracle.py --max-rows 250   # PASS: 30/30
 ./build/tests/test_pdhg
 ./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/afiro.mps --engine pdhg
 python3 tools/check_pdhg_vs_oracle.py --max-rows 100 --timeout 30
+
+# ticket #9 — the pivoting-free IPM, dense SQD LDL^T
+./build/tests/test_ipm
+./build/apps/sovereign-cli solve benchmarks/data/netlib_lp/afiro.mps --engine ipm
+python3 tools/check_ipm_vs_oracle.py --timeout 60
 ```
 
 **Not yet testable on this machine:** the GPU continuous core (#8, #9) — needs
@@ -976,3 +981,120 @@ not just that a counter increments.
 - `ctest`: 15/15. Sovereignty check: clean, including the resolved dependency
   graph (`check_pdhg_vs_oracle.py` needed the same scoped `highs` exception
   the other oracle-comparison scripts already have — added to its `paths`).
+
+---
+
+## 19. Ticket #9 — regularized pivoting-free IPM (Phase 2, M1)
+
+### 19.1 What was built
+
+```
+include/sovereign/ipm.hpp   IpmOptions, IpmResult, Ipm
+src/l1/ipm.cpp               Mehrotra predictor-corrector + dense SQD LDL^T
+tests/test_ipm.cpp           9 cases
+tools/check_ipm_vs_oracle.py oracle comparison at tight tolerance
+apps/sovereign_cli.cpp       `solve --engine ipm`
+```
+
+**The derivation (ipm.hpp carries the full version).** Same `z = (x, s)`,
+`M = [A, -I]` convention as simplex/PDHG. For each `z_j` with a finite lower
+bound, track `g_j = z_j - lo_j >= 0` and multiplier `lambda_j`; for a finite
+upper bound, `h_j = hi_j - z_j >= 0` and multiplier `zeta_j`. Linearizing the
+barrier-perturbed KKT conditions and eliminating `dlambda`, `dzeta` in favor
+of `dz` (textbook bounded-variable IPM reduction, re-derived from scratch,
+not lifted from any specific solver) collapses to one symmetric system:
+```
+[ -(Theta^-1 + delta_x I)      M^T          ] [dz]   [rhs_z]
+[  M                            delta_y I    ] [dy] = [rhs_y]
+```
+where `Theta_j^-1 = lambda_j/g_j + zeta_j/h_j`. Without `delta_x, delta_y`
+this is the classical augmented IPM system — negative semi-definite (1,1)
+block, zero (2,2) block, exactly where a numerical pivot search would
+normally be needed. Adding those two regularization terms makes both blocks
+strictly definite: this **is** the Symmetric Quasi-Definite (SQD) system the
+ticket asks for, which Vanderbei's 1995 result says factors via `LDLᵀ` in
+**any** diagonal order — including the natural, unpermuted one, which is
+what "no pivoting on the critical path" means concretely here. Full Mehrotra
+predictor-corrector (affine step → centering parameter from `(mu_aff/mu)^3`
+→ corrector with the second-order `dz_aff·dlambda_aff` cross term) reuses one
+factorization per iteration for both solves.
+
+**Scope, mirroring ticket #4's own precedent exactly.** Dense, from-scratch,
+no-pivoting `LDLᵀ` of the `(n+2m)×(n+2m)` augmented matrix, refactorized
+every iteration (Theta changes every step; there's no eta-file analogue
+here), capped at the same `kMaxDenseSize` discipline as simplex's
+`kMaxDenseRows` — refuses cleanly past the cap rather than grinding. Sparse
+`LDLᵀ` (cuDSS on GPU, or a from-scratch Markowitz-ordered CPU version) is
+named follow-up work, not attempted here, exactly as sparse LU was ticket
+#4's named follow-up.
+
+### 19.2 Four real bugs caught before this shipped
+
+The ticket's own "Watch out" calls the regularization schedule "the single
+most likely place to compute a silently-slightly-wrong answer" — that
+warning earned its keep. All four were caught by testing against the oracle
+on real Netlib instances, not by inspection:
+
+1. **Initial-point inconsistency for zero/narrow-gap bounds.** `g_j` and
+   `h_j` are not independent — `dg_j = dz_j = -dh_j`, so their *sum* is fixed
+   at `hi_j - lo_j` for the whole solve. An earlier version floored each
+   independently to at least 1.0 without checking that sum, which silently
+   pushed `z_j` outside its own box for any gap narrower than 2 — equality
+   rows (gap = 0) included. The convergence check only ever watched `Mz = 0`
+   and complementarity, never "is z itself still in its box," so this
+   corrupted `afiro`, `blend`, `sc50a/b`, `scsd1`, `recipe`, `share2b` (every
+   real instance with an equality row) while converging to tiny residuals at
+   a **wrong** point. Fixed by splitting the actual gap in half, floored only
+   when the gap itself is near zero — `tests/test_ipm.cpp`'s `equality_row`
+   and `fixed_variable` cases are the regression tests for this specifically.
+2. **No Ruiz/Pock-Chambolle front-end.** Bible §6.2's "mandatory front-end to
+   L1" was applied to PDHG (#8) but an earlier version of this engine never
+   scaled the problem at all. `adlittle` — a known badly-scaled Netlib
+   instance — responded by sending `mu` past `1e9` instead of converging.
+   Fixed by calling `Scaling::equilibrate` exactly as PDHG does, unscaling
+   the result at the end.
+3. **Factorization breakdown deep into convergence, with no recovery.**
+   `recipe` hit a near-zero pivot at iteration 14, with `mu` already down to
+   `~7e-9` — Theta⁻¹ entries that large make the elimination's floating-point
+   cancellation genuinely fragile even though the SQD guarantee holds in
+   exact arithmetic. Fixed with a backoff: on a factorization failure,
+   multiply `delta` by 10 and retry (up to 6 times) before giving up — the
+   direct, standard answer to the ticket's own "too little regularization"
+   framing.
+4. **No best-iterate tracking.** On `adlittle` specifically, pushing the
+   iteration budget past ~200 showed `mu` overshooting to `~1e-32` — deep
+   into floating-point noise relative to the O(1) quantities `Theta^-1` is
+   built from — after which the *next* Newton step was unreliable and moved
+   measurably away from the optimum, even though the point at iteration
+   ~199 was already correct. Fixed by tracking whichever iterate had the
+   best combined residual across the whole run and reporting that, not
+   whatever the last step happened to produce — standard, robust IPM
+   practice for exactly this late-stage fragility.
+
+### 19.3 Verification
+
+- `test_ipm` — 9 hand-checked cases, including dedicated regressions for the
+  equality-row and fixed-variable bugs above, and a complementary-slackness
+  check reusing ticket #7's `DualSolution` directly.
+- Hand-verified models converge to `~1e-12`–`1e-15` residuals in 5-9
+  iterations — dramatically tighter than PDHG, which is the entire point of
+  this engine.
+- `check_ipm_vs_oracle.py` on the full Netlib corpus at the (initial) 200-
+  iteration default: **40/60 checkable instances agreed with the oracle**
+  (31 correctly refused via the documented dense-size cap, not a
+  disagreement). Of the 20 remaining, spot-checking `agg`, `agg2`, `bandm`,
+  `beaconfd`, `lotfi`, `tuff` at a higher iteration cap (`/tmp/ipm_more`,
+  ad hoc — not a committed tool) confirmed they converge to the **correct**
+  answer given enough iterations (`bandm` ~400, `lotfi` ~1300) — genuinely
+  budget-limited, not a correctness bug. `max_iterations` default raised
+  from 200 to 1500 on that evidence.
+- **One honest, tracked gap:** `forplan` plateaus with `primal_res ≈ 94` even
+  at 2000 iterations and does not reach the correct objective. Checked for
+  the obvious suspect (free/`MI`/`PL` columns interacting badly with the
+  regularization floor) and ruled it out — `forplan` has no free columns,
+  just 21 `UP` and 3 `FX` bounds beyond the MPS default. The actual cause is
+  not yet identified; carried forward as a real gap rather than hidden,
+  same discipline as PDHG's `kb2`/`fit1d`/`fit2d` notes in §18.
+- `ctest`: 16/16. Sovereignty check clean, including the resolved dependency
+  graph (`check_ipm_vs_oracle.py` added to the `highs` exception's `paths`,
+  same pattern as the other oracle-comparison scripts).

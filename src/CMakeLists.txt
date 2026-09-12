@@ -25,6 +25,8 @@ add_library(sovereign_l0
   l1/duals.cpp
   # Ticket #8 -- PDHG/PDLP engine.
   l1/pdhg.cpp
+  # Ticket #9 -- regularized pivoting-free IPM.
+  l1/ipm.cpp
 )
 
 target_include_directories(sovereign_l0
