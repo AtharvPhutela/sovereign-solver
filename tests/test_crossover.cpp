@@ -134,6 +134,51 @@ End
     CHECK(r.winning_checkpoint_iteration == -1);
 }
 
+// --------------------------------------------------------------------------
+// ticket #12: the spiral jump is a strictly additive extra entrant
+// --------------------------------------------------------------------------
+
+TEST(crossover, disabling_the_spiral_jump_still_solves_correctly) {
+    // The spiral jump can only ever REMOVE a race entrant, never change what
+    // a winning entrant is allowed to claim -- disabling it must not break
+    // anything, just possibly cost a few more checkpoints before a plain
+    // attempt wins.
+    CrossoverOptions opt = frequent_checkpoints();
+    opt.enable_spiral_jump = false;
+    const char* text = R"(Maximize
+ obj: x + y
+Subject To
+ c1: x + 2 y <= 4
+ c2: 4 x + 2 y <= 12
+End
+)";
+    const CrossoverResult r = crossover(text, opt);
+    CHECK(r.status == CrossoverStatus::Optimal);
+    CHECK_NEAR(r.objective, 10.0 / 3.0, kTol);
+    CHECK(r.spiral_jump_attempts == 0);
+    CHECK(!r.won_by_spiral_jump);
+}
+
+TEST(crossover, a_zero_fit_residual_cutoff_disables_every_spiral_jump_attempt) {
+    // Same idea from the other direction: an impossible-to-clear cutoff
+    // should behave identically to enable_spiral_jump = false, since
+    // fit_residual is never negative -- confirms the cutoff is actually
+    // wired to estimate_spiral_jump's own output, not ignored.
+    CrossoverOptions opt = frequent_checkpoints();
+    opt.spiral_jump_fit_residual_cutoff = -1.0;
+    const char* text = R"(Minimize
+ obj: -x1 - x2
+Subject To
+ c1: x1 <= 4
+ c2: x1 + x2 <= 4
+ c3: x2 <= 2
+End
+)";
+    const CrossoverResult r = crossover(text, opt);
+    CHECK(r.status == CrossoverStatus::Optimal);
+    CHECK(r.spiral_jump_attempts == 0);
+}
+
 TEST(crossover, repeated_solves_do_not_hang_or_leak_threads) {
     // Practical evidence of clean join discipline (ticket #10's own
     // precedent): run several times back to back and confirm each one

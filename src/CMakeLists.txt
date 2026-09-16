@@ -31,6 +31,8 @@ add_library(sovereign_l0
   l1/race.cpp
   # Ticket #11 -- concurrent checkpoint crossover.
   l1/crossover.cpp
+  # Ticket #12 -- spiral-axis vertex jump.
+  l1/spiral_jump.cpp
 )
 
 # Ticket #10 needs real threads (std::thread, not just <thread>'s declarations).

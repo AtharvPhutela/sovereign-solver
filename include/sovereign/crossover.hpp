@@ -45,6 +45,7 @@
 #include "sovereign/pdhg.hpp"
 #include "sovereign/problem.hpp"
 #include "sovereign/simplex.hpp"
+#include "sovereign/spiral_jump.hpp"
 
 namespace sov {
 
@@ -73,6 +74,22 @@ struct CrossoverOptions {
     /// is available, cheap relative to the GPU iteration they overlap).
     SimplexOptions crossover_simplex;
 
+    /// Ticket #12 (SEED/FRONTIER, gate M2 stretch): alongside every regular
+    /// checkpoint attempt, also try extrapolating the spiral's fixed point
+    /// from the last 4 checkpoints (spiral_jump.hpp) and race a crossover
+    /// attempt from THAT point too. Purely additive -- disabling it can only
+    /// remove entrants from the race, never change what a winning entrant is
+    /// allowed to claim, so it defaults on. A jump attempt is only ever
+    /// launched when estimate_spiral_jump reports `available` AND its own
+    /// `fit_residual` is below `spiral_jump_fit_residual_cutoff`.
+    bool enable_spiral_jump = true;
+
+    /// See SpiralJumpResult::fit_residual's own doc comment. 0.3 is a
+    /// deliberately generous cutoff (not a tuned constant) -- this ticket's
+    /// own "Watch out" says the model may not generalize, so the bar here is
+    /// "plausibly worth a free extra race entrant," not "trusted."
+    Real spiral_jump_fit_residual_cutoff = 0.3;
+
     bool verbose = false;
 };
 
@@ -91,6 +108,15 @@ struct CrossoverResult {
     long long winning_checkpoint_iteration = -1;
 
     long long checkpoint_attempts = 0;    ///< crossover attempts launched in total
+
+    /// Ticket #12: how many of `checkpoint_attempts` were seeded from a
+    /// spiral-jump extrapolation rather than a checkpoint's own literal
+    /// point, and whether the WINNING attempt was one of them. The second
+    /// field is the ticket's own pass condition made directly observable:
+    /// true here on a real instance is the "reaches the correct vertex
+    /// faster" claim actually happening, not asserted.
+    long long spiral_jump_attempts = 0;
+    bool won_by_spiral_jump = false;
 
     double pdhg_seconds = 0.0;      ///< PDHG's own reported wall time
     double total_seconds = 0.0;     ///< wall time for the whole concurrent solve

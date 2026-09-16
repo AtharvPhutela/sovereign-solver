@@ -1371,3 +1371,122 @@ fires unconditionally at PDHG's existing restart-check cadence
 (spawning `O(iterations / restart_check_period)` Simplex solves on a large
 instance is not free); a real GPU run is what will make that tuning
 question concrete rather than theoretical.
+
+---
+
+## 22. Ticket #12 -- spiral-axis vertex jump (Phase 3, M2 stretch, SEED/FRONTIER)
+
+### 22.1 What was built
+
+```
+include/sovereign/spiral_jump.hpp   estimate_spiral_jump, SpiralJumpResult
+src/l1/spiral_jump.cpp              the order-2 minimal polynomial extrapolation
+tests/test_spiral_jump.cpp          7 cases, against a SYNTHETIC spiral
+include/sovereign/crossover.hpp     +enable_spiral_jump, +spiral_jump_fit_residual_cutoff,
+                                     +spiral_jump_attempts, +won_by_spiral_jump
+src/l1/crossover.cpp                the extra race entrant
+tests/test_crossover.cpp            +2 cases (additive, never required)
+apps/sovereign_cli.cpp              `--no-spiral-jump`, spiral-jump fields in
+                                     `solve --engine crossover` output
+```
+
+### 22.2 The math, and why it's trustworthy on its own terms
+
+`estimate_spiral_jump` is Sidi's Minimal Polynomial Extrapolation at order 2,
+self-derived in spiral_jump.hpp's own header comment from the assumption
+PDLP's literature documents: near the optimal face, PDHG's error
+`e_k = z_k - z*` often evolves as `e_{k+1} = M e_k` for a fixed operator `M`
+whose dominant mode is a COMPLEX-CONJUGATE eigenvalue pair -- a rotating,
+contracting spiral, not a straight-line approach (the reason ticket #8's
+restarts help at all: averaging over a rotation cancels it). Given 4
+consecutive iterates, the method fits the order-2 recurrence the resulting
+difference vectors must satisfy and solves directly for the point that
+recurrence converges to -- a weighted average of the first three iterates,
+with negative weights allowed (extrapolation, not interpolation), no further
+iteration run.
+
+**Verified against a synthetic spiral first, deliberately separated from
+real PDHG behavior.** `test_spiral_jump` constructs an exact
+rotate-and-contract sequence with a known fixed point (`estimate_spiral_jump`
+recovers it to `1e-6` for both a scalar and a joint primal+dual case) and
+confirms the method correctly DECLINES rather than guesses when the
+assumption's preconditions fail: a window with no rotational information
+(already converged, every difference zero) or only a single real eigenvalue
+(differences collinear, the 2x2 fit is exactly singular) both correctly
+return `available = false`. This is what makes it safe to wire into a real
+solve without knowing in advance whether any given instance's dynamics will
+cooperate -- the math itself is correct and self-certifying about when it
+applies, independent of the empirical question below.
+
+### 22.3 Integration: a strictly additive race entrant, never a replacement
+
+Per the ticket's own "Watch out" ("do NOT let it block M2 -- #11 is the
+committed path"), the spiral jump changes nothing about ticket #11's own
+correctness or of its own accord: `Crossover` maintains a 4-point window of
+raw checkpoint iterates (touched only from the single-threaded PDHG
+checkpoint callback, no lock needed for the window itself) and, whenever the
+window is full and `estimate_spiral_jump` reports `available` with a
+`fit_residual` below `spiral_jump_fit_residual_cutoff` (default `0.3`,
+explicitly a generous "worth a free extra entrant" bar, not a tuned
+constant), launches ONE MORE crossover attempt from the extrapolated point
+-- racing alongside, never instead of, the checkpoint's own literal-point
+attempt. `enable_spiral_jump = false` removes every such entrant and the
+solve is provably unaffected in what it can conclude (`test_crossover`:
+`disabling_the_spiral_jump_still_solves_correctly`), because every attempt,
+spiral-jump-seeded or not, is just another `WarmStart` guess into the same
+Simplex machinery ticket #11 already made safe against a bad guess.
+
+Clean under ThreadSanitizer (3 fresh runs, 0 warnings) after adding the new
+shared counters and the `launch_attempt` helper -- re-run for the same
+reason ticket #11's own concurrency was re-checked rather than trusted by
+inspection.
+
+### 22.4 The empirical question, answered honestly
+
+The ticket's own Done-when is explicit that a negative result is an
+acceptable outcome here, carried as a documented roadmap line rather than
+hidden. Tested against 9 real Netlib instances (`afiro`, `adlittle`,
+`sc50a`, `sc50b`, `kb2`, `blend`, `brandy`, `fit1d`, plus repeated runs of
+`blend`/`share2b`/`afiro` for race-timing variance) via `--engine crossover
+--json`:
+
+- The mechanism fires SELECTIVELY, as designed -- 0-1 spiral-jump attempts
+  on well-conditioned small instances (`afiro`, `brandy`), 13-15 on
+  instances with richer dynamics (`blend`, `sc50b`) -- confirming
+  `fit_residual` is doing real filtering, not passing everything or
+  nothing.
+- **It has not won a single race in this test suite.** Every solve above
+  reached the exact optimum correctly (never a regression -- ticket #11's
+  own literal-checkpoint attempts, or the final fallback, always closed it
+  out), but `won_by_spiral_jump` was `false` on every run tried.
+- The likely reason, based on watching `checkpoint_attempts` vs.
+  `winning_checkpoint_iteration`: dozens of attempts (both kinds) launch
+  over a single PDHG run on this 12-core machine, and the race is won by
+  whichever warm start needs the FEWEST Simplex pivots -- which tends to be
+  a LATE, already near-converged literal checkpoint (a very easy Simplex
+  finish), not an early spiral-jump extrapolation whose target itself is
+  less accurate this early in the run. This is a genuine, previously-unclear
+  empirical finding, not a defect in the extrapolation math (S22.2's
+  synthetic tests confirm the math is right when its own preconditions hold)
+  -- it may be an artifact of CPU-oversubscribed concurrent racing
+  specifically, which could read differently on a real GPU where PDHG's own
+  iteration cost (not Simplex pivot count) dominates the wall-clock and an
+  early jump has more time to matter. Untested, because that needs the same
+  GPU this project has lacked since S9.
+
+**Per the Build Map's own accepted outcome for this ticket:** carried as
+attempted, correctly implemented, empirically not a winner on the CPU-only
+instances tested here, and left ENABLED by default because it never costs
+correctness and never blocks M2 (already closed by #11) -- a clean roadmap
+line, re-evaluate once a GPU is available (S9/S17.2/S20.3's same standing
+gap) or a larger instance class surfaces a case where it does win.
+
+### 22.5 Verification
+
+- `test_spiral_jump` -- 7 cases (S22.2).
+- `test_crossover` -- +2 cases: disabling the spiral jump still solves
+  correctly; an unreachable cutoff (`-1.0`) disables every spiral-jump
+  attempt, confirming the cutoff is actually wired to
+  `estimate_spiral_jump`'s own output rather than ignored.
+- Clean under ThreadSanitizer, 3 fresh runs.
+- `ctest`: 19/19. Sovereignty check clean.

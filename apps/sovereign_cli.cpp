@@ -43,6 +43,7 @@ int usage() {
         "                           pdhg/ipm always apply it internally, mandatorily)\n"
         "  --tolerance T            pdhg (default 1e-4) / ipm (default 5e-8) tolerance\n"
         "  --no-simplex/--no-pdhg/--no-ipm   race: exclude an entrant\n"
+        "  --no-spiral-jump         crossover: disable the ticket #12 extra entrant\n"
         "  --verbose                per-phase / per-restart progress\n");
     return 2;
 }
@@ -337,6 +338,9 @@ int command_solve_crossover(const std::string& path, bool json, const sov::Cross
                     static_cast<long long>(result.winning_checkpoint_iteration));
         std::printf("  \"checkpoint_attempts\": %lld,\n",
                     static_cast<long long>(result.checkpoint_attempts));
+        std::printf("  \"spiral_jump_attempts\": %lld,\n",
+                    static_cast<long long>(result.spiral_jump_attempts));
+        std::printf("  \"won_by_spiral_jump\": %s,\n", result.won_by_spiral_jump ? "true" : "false");
         std::printf("  \"pdhg_seconds\": %.6f,\n", result.pdhg_seconds);
         std::printf("  \"total_seconds\": %.6f,\n", result.total_seconds);
         std::printf("  \"message\": \"%s\"\n", escape(result.message).c_str());
@@ -348,9 +352,11 @@ int command_solve_crossover(const std::string& path, bool json, const sov::Cross
         std::printf("status      : %s\n", sov::to_string(result.status));
         if (result.status == sov::CrossoverStatus::Optimal)
             std::printf("objective   : %.12g\n", result.objective);
-        std::printf("checkpoints : %lld attempted, winner from iteration %lld\n",
+        std::printf("checkpoints : %lld attempted (%lld spiral-jump), winner from iteration %lld%s\n",
                     static_cast<long long>(result.checkpoint_attempts),
-                    static_cast<long long>(result.winning_checkpoint_iteration));
+                    static_cast<long long>(result.spiral_jump_attempts),
+                    static_cast<long long>(result.winning_checkpoint_iteration),
+                    result.won_by_spiral_jump ? "  [won by spiral jump]" : "");
         std::printf("time        : %.3f s total (pdhg %.3f s)\n",
                     result.total_seconds, result.pdhg_seconds);
         if (!result.message.empty())
@@ -400,6 +406,7 @@ int main(int argc, char** argv) {
             pdhg_opt.tolerance = std::stod(argv[i + 1]);
             ipm_opt.tolerance = std::stod(argv[++i]);
         }
+        else if (a == "--no-spiral-jump") crossover_opt.enable_spiral_jump = false;
         else if (a == "--no-simplex") race_opt.use_simplex = false;
         else if (a == "--no-pdhg") race_opt.use_pdhg = false;
         else if (a == "--no-ipm") race_opt.use_ipm = false;

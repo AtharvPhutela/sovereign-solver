@@ -98,7 +98,7 @@ CrossoverStatus from_solve_status(SolveStatus s) {
     }
 }
 
-CrossoverResult from(const SimplexResult& r, long long checkpoint_iteration) {
+CrossoverResult from(const SimplexResult& r, long long checkpoint_iteration, bool is_spiral_jump) {
     CrossoverResult out;
     out.status = from_solve_status(r.status);
     out.objective = r.objective;
@@ -106,6 +106,7 @@ CrossoverResult from(const SimplexResult& r, long long checkpoint_iteration) {
     out.dual = r.dual;
     out.reduced_costs = r.reduced_costs;
     out.winning_checkpoint_iteration = checkpoint_iteration;
+    out.won_by_spiral_jump = is_spiral_jump;
     return out;
 }
 
@@ -123,6 +124,7 @@ struct SharedState {
     std::vector<std::thread> attempt_threads;
     long long launched_attempts = 0;
     long long finished_attempts = 0;
+    long long spiral_jump_attempts = 0;   ///< ticket #12
     bool pdhg_finished = false;
 };
 
@@ -142,11 +144,11 @@ CrossoverResult Crossover::solve(const Problem& problem, Backend& backend) const
     SharedState shared;
     CancellationToken pdhg_token;
 
-    auto report = [&](SimplexResult r, long long checkpoint_iteration) {
+    auto report = [&](SimplexResult r, long long checkpoint_iteration, bool is_spiral_jump) {
         std::lock_guard<std::mutex> lock(shared.mtx);
         ++shared.finished_attempts;
         if (is_valid(r.status) && !shared.winner.has_value()) {
-            shared.winner = from(r, checkpoint_iteration);
+            shared.winner = from(r, checkpoint_iteration, is_spiral_jump);
             // Cancel PDHG and every OTHER in-flight attempt. The winner's own
             // token is already past its solve; cancelling it too is harmless.
             pdhg_token.cancel();
@@ -155,38 +157,73 @@ CrossoverResult Crossover::solve(const Problem& problem, Backend& backend) const
         shared.cv.notify_all();
     };
 
-    PdhgOptions pdhg_opt = options_.pdhg;
-    pdhg_opt.checkpoint = [&](long long iteration, const std::vector<Real>& x,
-                              const std::vector<Real>& y, Real /*residual*/) {
-        // Runs synchronously on the PDHG thread -- must return promptly.
-        // Building the warm-start guess is pure host-side arithmetic over
-        // `problem` (read-only, safe to touch without the lock) and is cheap
-        // next to a checkpoint's own KKT-residual computation; only the
-        // shared bookkeeping needs the mutex.
-        std::unique_lock<std::mutex> lock(shared.mtx);
+    // Launches one crossover attempt from an already-computed guess. Callers
+    // compute the (possibly not-cheap) WarmStart BEFORE calling this, so the
+    // lock held here only ever covers bookkeeping + thread spawn, never the
+    // guess computation itself.
+    auto launch_attempt = [&](WarmStart ws, long long iteration, bool is_spiral_jump) {
+        std::lock_guard<std::mutex> lock(shared.mtx);
         if (shared.winner.has_value()) return;   // already won; stop spawning attempts
         ++shared.launched_attempts;
+        if (is_spiral_jump) ++shared.spiral_jump_attempts;
         shared.attempt_tokens.emplace_back();
         CancellationToken* tok = &shared.attempt_tokens.back();
-        lock.unlock();
-
-        WarmStart ws = guess_basis_from_point(problem, x, y);
-
-        lock.lock();
-        shared.attempt_threads.emplace_back([&, ws = std::move(ws), tok, iteration]() {
+        shared.attempt_threads.emplace_back([&, ws = std::move(ws), tok, iteration, is_spiral_jump]() {
             try {
                 Simplex simplex(options_.crossover_simplex);
                 SimplexResult r = simplex.solve(problem, tok, &ws);
-                report(std::move(r), iteration);
+                report(std::move(r), iteration, is_spiral_jump);
             } catch (const std::exception&) {
                 // problem was already validated once above; Simplex::solve
                 // only throws on that structural check, so this should be
                 // unreachable. Caught anyway so an attempt thread can never
                 // escape an exception into std::terminate -- it just loses.
-                report(SimplexResult{}, iteration);
+                report(SimplexResult{}, iteration, is_spiral_jump);
             }
         });
-        lock.unlock();
+    };
+
+    // Ticket #12: a short window of the last 4 RAW checkpoint points (not
+    // warm-start guesses). Touched only from the checkpoint callback below,
+    // which PDHG only ever calls synchronously on its own single thread --
+    // no lock needed for this specifically, unlike everything in `shared`.
+    std::deque<std::pair<std::vector<Real>, std::vector<Real>>> spiral_history;
+
+    PdhgOptions pdhg_opt = options_.pdhg;
+    pdhg_opt.checkpoint = [&](long long iteration, const std::vector<Real>& x,
+                              const std::vector<Real>& y, Real /*residual*/) {
+        // Runs synchronously on the PDHG thread -- must return promptly.
+        // Building a warm-start guess is pure host-side arithmetic over
+        // `problem` (read-only, safe without the lock) and is cheap next to
+        // a checkpoint's own KKT-residual computation.
+        {
+            std::lock_guard<std::mutex> lock(shared.mtx);
+            if (shared.winner.has_value()) return;   // already won; nothing left to try
+        }
+
+        launch_attempt(guess_basis_from_point(problem, x, y), iteration, /*is_spiral_jump=*/false);
+
+        // Ticket #12 -- the spiral jump is purely an ADDITIONAL entrant
+        // racing alongside the checkpoint's own literal-point attempt above,
+        // never a replacement for it: this instance's PDHG dynamics may not
+        // actually look like a clean 2D spiral (the ticket's own "Watch
+        // out"), and the literal-point attempt is what still solves it when
+        // they don't.
+        if (options_.enable_spiral_jump) {
+            spiral_history.emplace_back(x, y);
+            if (spiral_history.size() > 4) spiral_history.pop_front();
+            if (spiral_history.size() == 4) {
+                std::vector<std::vector<Real>> xs, ys;
+                xs.reserve(4);
+                ys.reserve(4);
+                for (const auto& [px, py] : spiral_history) { xs.push_back(px); ys.push_back(py); }
+                const SpiralJumpResult jump = estimate_spiral_jump(xs, ys);
+                if (jump.available && jump.fit_residual < options_.spiral_jump_fit_residual_cutoff) {
+                    launch_attempt(guess_basis_from_point(problem, jump.x, jump.y), iteration,
+                                   /*is_spiral_jump=*/true);
+                }
+            }
+        }
     };
 
     PdhgResult pdhg_result;
@@ -224,7 +261,7 @@ CrossoverResult Crossover::solve(const Problem& problem, Backend& backend) const
         SimplexResult r = simplex.solve(problem, nullptr, &ws);
         ++shared.launched_attempts;
         ++shared.finished_attempts;
-        if (is_valid(r.status)) shared.winner = from(r, -1);
+        if (is_valid(r.status)) shared.winner = from(r, -1, /*is_spiral_jump=*/false);
     }
 
     pdhg_thread.join();
@@ -249,6 +286,7 @@ CrossoverResult Crossover::solve(const Problem& problem, Backend& backend) const
                               + std::string(to_string(pdhg_result.status)) + "'";
     }
     final_result.checkpoint_attempts = shared.launched_attempts;
+    final_result.spiral_jump_attempts = shared.spiral_jump_attempts;
     final_result.pdhg_seconds = pdhg_result.seconds;
     final_result.total_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
