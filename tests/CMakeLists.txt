@@ -47,6 +47,9 @@ sovereign_add_test(test_crossover  test_crossover.cpp)
 # Ticket #12 -- spiral-axis vertex jump.
 sovereign_add_test(test_spiral_jump test_spiral_jump.cpp)
 
+# Ticket #13 -- lightweight dual-preserving presolve.
+sovereign_add_test(test_presolve  test_presolve.cpp)
+
 # Interface parity. On a machine with no CUDA/ROCm toolkit the GPU backends are
 # never compiled, so a change to the Backend interface would leave them behind
 # silently. This is the part of their correctness checkable without a GPU.

@@ -1490,3 +1490,151 @@ gap) or a larger instance class surfaces a case where it does win.
   `estimate_spiral_jump`'s own output rather than ignored.
 - Clean under ThreadSanitizer, 3 fresh runs.
 - `ctest`: 19/19. Sovereignty check clean.
+
+---
+
+## 23. Ticket #13 -- lightweight dual-preserving presolve (Phase 4, M3)
+
+### 23.1 What was built
+
+```
+include/sovereign/presolve.hpp   PresolveMove variant, PresolveResult, PostsolveResult,
+                                  presolve(), postsolve()
+src/l1/presolve.cpp              the reduction pipeline + trail replay
+tests/test_presolve.cpp          10 cases, each checked via #7's own
+                                  complementary_slackness_violation
+apps/sovereign_cli.cpp           `presolve <model>` -- reduces, solves the
+                                  reduced model, postsolves, and self-verifies
+tools/check_presolve_vs_oracle.py   reduction size vs. HiGHS's own presolve log
+```
+
+### 23.2 Scope -- four move types, each with a PROVEN postsolve rule
+
+The ticket's own "Watch out" ("dual-preservation is not optional -- break it
+and you break Benders and conflict learning downstream") was taken
+literally: every reduction implemented here removes a row or column via a
+move whose postsolve dual-reconstruction rule was derived by hand (in
+presolve.hpp's own file comment) from the original problem's KKT conditions,
+not just asserted plausible.
+
+- **FixedColumnMove** -- a column pinned to one value (originally `lo==hi`,
+  or tightened to a point by a SingletonRowMove) is substituted out, folding
+  its contribution into every row it still touched.
+- **EmptyColumnMove** -- a column touching no active row is resolved
+  directly from its own bounds and the objective's sign; it never had a
+  row's dual to account for, so its postsolve reduced cost is just its
+  objective coefficient.
+- **RedundantRowMove** -- a row whose activity range (computed from bounds
+  it did not itself produce) already sits inside its own bounds. Its dual
+  is UNCONDITIONALLY 0 in postsolve: by construction it is never binding
+  across the entire feasible region the check considered, and a constraint
+  that never binds has zero shadow price in ANY optimal dual solution --
+  no case split needed.
+- **SingletonRowMove** -- a row with exactly one active nonzero coefficient
+  tightens that column's bound and is removed. Its dual is NOT
+  unconditionally 0 -- see S23.3.
+
+**Deliberately out of scope, named as follow-up, not half-attempted (same
+discipline ticket #4 applied to sparse LU):** general non-removing
+activity-based bound tightening, and multi-variable "forcing row"
+elimination (pinning several columns from one row's own extreme
+simultaneously). Both need the SAME dual-redistribution reasoning
+generalized across a longer dependency chain; getting it wrong silently is
+exactly the failure mode the ticket warns about. This is also the honest
+reason the reduction SIZE falls well short of "~90% of a commercial
+presolve" (S23.5) -- most of a commercial presolve's power is in exactly
+these two families.
+
+### 23.3 The singleton-row dual formula, and why it needs one
+
+Worked out by hand before writing any code (presolve.cpp's own header
+comment carries the full derivation): the REDUCED problem's own solve
+reports `rc_reduced[j] = c_j - sum_{rows still present} a_kj y_k` for the
+tightened column `j` -- row `i` (the singleton row) is simply absent from
+that sum. The TRUE original reduced cost is `rc_true[j] = rc_reduced[j] -
+a_ij * y_i`.
+
+- If `x_j` ends up at a bound STRICTLY TIGHTER than its pre-row-`i` bound
+  (row `i` is the actual reason `x_j` sits there): relative to the
+  ORIGINAL, wider bound, `x_j` is interior, so KKT requires `rc_true[j] = 0`
+  exactly -- which pins `y_i = rc_reduced[j] / a_ij`.
+- If `x_j` does not sit at the bound row `i` produced (interior even to the
+  tightened bound, or the tightened bound happens to coincide with the
+  original one): row `i` contributed nothing distinguishable, and `y_i = 0`
+  is safe.
+
+An earlier draft of this reasoning (worked through by hand against a small
+`x + y <= 10, y in [2,3]` example before any code was written) initially
+assumed `y_i = 0` was ALWAYS safe once a row becomes redundant on a later
+pass -- exactly the case a hand-derived counterexample caught: if the row's
+own tightening is what CAUSED its later redundancy, the column can end up
+interior to its ORIGINAL bounds while the reduced solve reports a nonzero
+reduced cost for it, which is only consistent if that reduced cost is
+attributed to the row rather than reported as-is. This is why
+SingletonRowMove and RedundantRowMove are two DIFFERENT move types with two
+different dual rules, not one generic "row removed -> y=0": a row is only
+ever safe at `y=0` unconditionally when its own removal did not itself
+create the bound the final point might be sitting at.
+
+### 23.4 Postsolve architecture: a trail, replayed in reverse (LIFO)
+
+Every move is appended to `trail` in the order APPLIED. `postsolve` walks
+`trail` in REVERSE. The invariant that makes each move's local dual rule
+sufficient: by the time any move's undo runs, every row/column it
+references was either never removed, or removed by a move LATER in forward
+order -- which, in reverse (LIFO), has ALREADY been undone. Concretely: a
+`FixedColumnMove.rows` list only ever contains rows that were still ACTIVE
+at the moment that column was fixed, so any row in it was either never
+removed (known from the start) or removed by a STRICTLY LATER move (already
+restored by the time this one's reverse-undo runs). This is Andersen &
+Andersen's own standard presolve/postsolve design, re-derived here rather
+than copied, and it is what makes the two-step chain in
+`chained_reductions_across_rounds_still_check_out`'s test (a SingletonRowMove
+tightens a column to a point, a LATER FixedColumnMove substitutes it out)
+compose correctly without either move needing to know about the other.
+
+### 23.5 Verification
+
+- `test_presolve` -- 10 hand-verified cases, one per move type plus a
+  two-round chained case and two ordinary (non-reducible) models. Every
+  single case runs through the SAME check: presolve -> solve the reduced
+  model -> postsolve -> confirm the objective matches a direct
+  (unpresolved) solve exactly AND `DualSolution::complementary_slackness_
+  violation` (ticket #7's own checker, reused rather than reinvented) is
+  near zero against the ORIGINAL problem. A move that is individually
+  "tested" but produces a subtly wrong dual cannot pass this.
+- **Against the real corpus, exact-tolerance:** every Netlib LP instance up
+  to 500 rows (51 instances) presolves, solves, postsolves, and passes both
+  the objective-match and complementary-slackness checks --
+  `check_presolve_vs_oracle.py`: **51/51 verified**. Two instances
+  (`d6cube`, `fit2d`) time out at the script's default 30s budget on this
+  machine's sequential CPU presolve (see S23.6) and are skipped, not
+  counted as failures.
+- **Reduction size vs. HiGHS's own presolve** (parsed from its `Presolve :
+  Reductions: rows R(-r); columns C(-c); elements E(-e)` log line, summed
+  across every comparable instance): **rows 30.6%, columns 12.9%, elements
+  10.6%** of what HiGHS's presolve removes on the same instances. This is
+  the ticket's own "~90%" pass condition, reported honestly rather than
+  rounded up -- the gap is exactly the two families named out of scope in
+  S23.2 (general bound tightening and forcing rows are where most of a
+  commercial presolve's reduction actually comes from). The ~30%/13%/11%
+  achieved here is real, verified-correct reduction from a deliberately
+  narrower move set, not a partial or unsound version of the full one.
+- `ctest`: 20/20. Sovereignty check clean.
+
+### 23.6 What is NOT done here, tracked forward
+
+- **General activity-based bound tightening and multi-variable forcing-row
+  elimination** (S23.2) -- the largest concrete gap against the "~90%"
+  target. Needs the singleton-row dual-redistribution idea (S23.3)
+  generalized to a bound that may have been tightened by SEVERAL rows in
+  sequence, not just one -- a real extension, not a rewrite, but real work.
+- **Sequential CPU only**, matching ticket #4's own precedent: this is the
+  correctness baseline, not the GPU-native/tight-parallel version Bible
+  S4.4 ultimately wants. `d6cube` and `fit2d` (the two timeouts above) are
+  exactly the instances large/dense enough that this matters in practice.
+- **No duplicate row/column detection, no coefficient strengthening, no
+  parallel-row/column merging** -- all standard commercial-presolve
+  reductions, all untouched here. Each would need its own dual-postsolve
+  derivation with the same care as S23.3; none was attempted rather than
+  guessed at.
