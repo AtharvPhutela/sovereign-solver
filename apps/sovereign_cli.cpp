@@ -19,6 +19,7 @@
 #include "sovereign/pdhg.hpp"
 #include "sovereign/presolve.hpp"
 #include "sovereign/race.hpp"
+#include "sovereign/structure.hpp"
 #include "sovereign/scaling.hpp"
 #include "sovereign/simplex.hpp"
 
@@ -33,6 +34,7 @@ int usage() {
         "  solve    <model>   solve the LP relaxation with the revised simplex\n"
         "  presolve <model>   run ticket #13 presolve and report the reduction,\n"
         "                     then solve+postsolve and verify against a direct solve\n"
+        "  structure <model>  run ticket #14 hypergraph structure detection\n"
         "\n"
         "options:\n"
         "  --json                   machine-readable output\n"
@@ -436,6 +438,33 @@ int command_presolve(const std::string& path, bool json) {
     return pr.status == sov::PresolveStatus::Infeasible ? 0 : (verified ? 0 : 1);
 }
 
+// Ticket #14 -- hypergraph structure detection: reports whether the model
+// decomposes into scenario/block-angular structure and, if so, how many
+// blocks and linking rows.
+int command_structure(const std::string& path, bool json) {
+    const sov::ReadResult r = sov::read_model(path);
+    const sov::StructureResult sr = sov::detect_structure(r.problem);
+
+    if (json) {
+        std::printf("{\n");
+        std::printf("  \"path\": \"%s\",\n", escape(path).c_str());
+        std::printf("  \"kind\": \"%s\",\n", sov::to_string(sr.kind));
+        std::printf("  \"num_blocks\": %lld,\n", static_cast<long long>(sr.num_blocks));
+        std::printf("  \"linking_rows\": %zu,\n", sr.linking_rows.size());
+        std::printf("  \"total_rows\": %lld,\n", static_cast<long long>(r.problem.num_rows()));
+        std::printf("  \"message\": \"%s\"\n", escape(sr.message).c_str());
+        std::printf("}\n");
+    } else {
+        std::printf("%s\n", r.problem.summary().c_str());
+        std::printf("structure   : %s\n", sov::to_string(sr.kind));
+        std::printf("blocks      : %lld\n", static_cast<long long>(sr.num_blocks));
+        std::printf("linking rows: %zu / %lld\n", sr.linking_rows.size(),
+                    static_cast<long long>(r.problem.num_rows()));
+        std::printf("note        : %s\n", sr.message.c_str());
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -501,6 +530,7 @@ int main(int argc, char** argv) {
     try {
         if (command == "info") return command_info(path, json, warnings);
         if (command == "presolve") return command_presolve(path, json);
+        if (command == "structure") return command_structure(path, json);
         if (command == "solve" && engine == "pdhg") return command_solve_pdhg(path, json, pdhg_opt);
         if (command == "solve" && engine == "ipm") return command_solve_ipm(path, json, ipm_opt);
         if (command == "solve" && engine == "race") return command_solve_race(path, json, race_opt);

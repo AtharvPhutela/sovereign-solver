@@ -1638,3 +1638,146 @@ compose correctly without either move needing to know about the other.
   reductions, all untouched here. Each would need its own dual-postsolve
   derivation with the same care as S23.3; none was attempted rather than
   guessed at.
+
+---
+
+## 24. Ticket #14 -- hypergraph structure detection (Phase 4, M3)
+
+### 24.1 What was built
+
+```
+include/sovereign/structure.hpp   StructureKind, StructureOptions, StructureResult,
+                                   detect_structure()
+src/l1/structure.cpp              degree-thresholded union-find classifier
+tests/test_structure.cpp          7 cases against SYNTHETIC block-angular models
+apps/sovereign_cli.cpp            `structure <model>`
+```
+
+### 24.2 Scope -- an exact classifier on a deliberately narrower problem
+
+The Build Map asks for multi-level hypergraph partitioning (minimize the cut
+corresponding to coupling constraints) -- genuinely NP-hard, and the ticket
+is tagged Research precisely because a GPU-parallel version is described in
+the Bible as having "virtually nonexistent" literature. What is built here
+is a single-level, EXACT (not a heuristically-refined minimum cut) method
+that proves the underlying idea on the case real scenario-decomposable
+models actually present: columns as nodes, rows as hyperedges, from scratch
+(no partitioning library -- `sovereignty.toml` forbids KaHyPar/PaToH/hMETIS
+by name for exactly this reason, ticket #1).
+
+**The method.** Rows are split by degree (active nonzero count) against a
+threshold set from the MEDIAN row degree (not the mean -- a handful of
+high-degree linking rows should not drag the reference up and hide
+themselves; a few outliers barely move a median the way they move a mean).
+Low-degree "local candidate" rows union their columns into a disjoint-set
+forest (Bible's column-graph idea, built directly rather than as an
+explicit graph); high-degree "linking candidate" rows are excluded from
+that step. Every column that ends up in the same set gets the same block
+id. Every row -- both candidate sets -- is then RECLASSIFIED by how many
+distinct blocks its columns actually landed in: exactly one is a genuine
+local row of that block; more than one is a genuine linking row, regardless
+of which candidate set it started in. This means a "local candidate" that
+still happens to bridge two blocks correctly merges them (see
+`a_single_bridging_row_correctly_merges_two_blocks` -- this is CORRECT
+behavior, the model really isn't separable there, not a detection bug).
+
+### 24.3 Verified: exact recovery on the ticket's own stated test case
+
+The Build Map's Test step is explicit: "on a known block-angular instance
+(e.g. a stochastic program with obvious scenario blocks), confirm the
+partitioner recovers the true block structure." `test_structure.cpp` builds
+SYNTHETIC scenario-shaped models with a KNOWN true block assignment (local
+recourse-style rows within each block, degree-2; linking rows touching
+every block, degree = blocks * columns-per-block, deliberately far above
+local-row degree) and checks recovery by construction, not by eyeballing a
+printed result:
+
+- 4 blocks, 2 linking rows: every column recovered into the correct block,
+  exactly 2 linking rows identified, `num_blocks == 4` exactly.
+- 2 blocks with zero linking rows: recovered exactly.
+- A single low-degree row deliberately bridging two otherwise-separate
+  groups: correctly reported as ONE merged block (not a false
+  BlockAngular), confirming the reclassification pass -- not just the
+  initial degree guess -- is what determines the final verdict.
+- An ordinary dense LP (every column in every row): correctly Monolithic.
+- Degenerate inputs (empty problem, a column touching no row) handled
+  without crashing.
+- A synthetic case with real block structure but linking rows above
+  `max_linking_row_fraction`: correctly reported Monolithic even though
+  blocks were genuinely found -- "technically decomposable" is not the same
+  as "worth decomposing."
+
+All 7 cases pass. This is the ticket's own explicit pass condition, met
+exactly.
+
+### 24.4 Honest finding: the same heuristic over-fragments ordinary industrial LPs
+
+Tested against real Netlib LP instances (`sovereign-cli structure <model>`)
+-- NONE of which are stochastic/scenario-structured models, so a correct
+classifier should mostly report Monolithic or a small, sensible block
+count. Instead, at the default `degree_threshold_factor = 2.0`:
+
+```
+brandy     220 rows   -> 126 "blocks", 76 linking rows
+degen2     444 rows   -> 93 "blocks", 147 linking rows
+adlittle    56 rows   -> 26 "blocks", 14 linking rows
+afiro       27 rows   -> 13 "blocks", 7 linking rows
+share1b     117 rows  -> 79 "blocks", 12 linking rows
+```
+
+**This is real, spurious over-fragmentation, investigated rather than
+shrugged off.** Re-running `detect_structure` with NO degree exclusion at
+all (every row included in the union step -- i.e. the raw, exact connected-
+components of the column-row bipartite graph, no heuristic guessing)
+confirms `brandy` has a genuine 2-component ground truth, but the default
+threshold fragments it into 126 pieces. Sweeping `degree_threshold_factor`
+from 1.5 to 20 on `brandy` alone tracks smoothly down toward the true
+answer (191 -> 126 -> 73 -> 30 -> 16 -> 3 blocks), but the SAME sweep on
+`share1b` stays pinned at 79 blocks regardless of the floor or factor tried
+-- confirming this is not a single mis-set constant away from being fixed,
+but a genuine per-instance calibration problem: how "unusually high" a
+row's degree needs to be before it is plausibly a linking constraint has no
+single right answer across real industrial LPs, which is exactly what the
+Bible's own framing for this ticket ("the state of the literature... the
+research question is genuinely open") predicts.
+
+**What this does and does not mean.** The method is exact and correct on
+the structure class it was built for (S24.3) -- a real stochastic program
+or scenario-decomposable model, where linking rows (first-stage coupling
+constraints) are typically both RARE and MUCH higher-degree than the local
+recourse rows around them, exactly the separation the synthetic tests
+construct. It is NOT currently safe to trust blindly on an arbitrary LP.
+This is precisely why ticket #25's own design (Build Map: "the orchestrator
+... RACES the chosen decomposition against the monolithic solve, first-to-
+optimality wins... a structured instance where decomposition happens to be
+slow must still be solved by the monolithic engine, not hang") already
+treats a structure verdict as a ROUTING HINT to race, never a decision to
+trust outright -- this classifier's real-instance unreliability is exactly
+the risk that architecture is there to absorb, not a surprise sprung on it.
+
+### 24.5 Not attempted, tracked forward
+
+- **Multi-level coarsening and iterative (FM-style) cut refinement** -- the
+  actual Build Map ask. A single-level exact-components method was built
+  instead, honestly scoped as a prototype proving the concept on the clean
+  case, per the ticket's own Research/Type framing.
+- **Adaptive or learned threshold selection** -- S24.4's finding suggests a
+  single global `degree_threshold_factor` cannot be calibrated once for all
+  instance shapes; a per-instance adaptive threshold (e.g. searching for a
+  degree value that maximizes some structure-quality score, or a small
+  learned classifier per Bible S4.6's plugin philosophy) is the concrete
+  next step, not attempted here.
+- **No validation against actual decomposition speedup.** This ticket only
+  classifies structure; whether racing Benders/Dantzig-Wolfe against the
+  monolith on a classified-BlockAngular instance is actually faster is
+  ticket #25's own question, unanswered here.
+
+### 24.6 Verification
+
+- `test_structure` -- 7 cases (S24.3), all against synthetic models with a
+  known ground truth checked by construction.
+- Real-instance investigation (S24.4): not a formal test (there is no
+  "correct" block count to assert for an ordinary LP), but a documented,
+  reproducible finding via `sovereign-cli structure <model>` and a
+  parameter sweep, kept honest rather than hidden.
+- `ctest`: 21/21. Sovereignty check clean.
