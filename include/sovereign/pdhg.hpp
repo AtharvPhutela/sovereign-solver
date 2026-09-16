@@ -59,6 +59,7 @@
 // generalize is crossover, unaffected either way).
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -116,6 +117,20 @@ struct PdhgOptions {
     int power_iterations = 30;
 
     bool verbose = false;
+
+    /// Ticket #11 (concurrent checkpoint crossover). If set, called every
+    /// `restart_check_period` iterations with the ORIGINAL-space candidate
+    /// point this iteration already unscaled and checked for convergence --
+    /// the callback is free of any extra unscaling work PDHG was not already
+    /// doing. `original_residual` is that candidate's residual against the
+    /// real problem (what the loop itself compares to `tolerance`).
+    ///
+    /// Runs synchronously ON THE PDHG THREAD, between one iteration and the
+    /// next -- it must return promptly (hand the point to another thread and
+    /// return, never solve anything here) or it becomes the very serial
+    /// bottleneck concurrent crossover exists to avoid.
+    std::function<void(long long iteration, const std::vector<Real>& x_original,
+                       const std::vector<Real>& y_original, Real original_residual)> checkpoint;
 };
 
 struct PdhgResult {

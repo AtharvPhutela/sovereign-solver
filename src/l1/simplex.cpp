@@ -195,8 +195,9 @@ private:
 
 class SimplexImpl {
 public:
-    SimplexImpl(const Problem& p, const SimplexOptions& opt, const CancellationToken* cancel)
-        : problem_(p), opt_(opt), cancel_(cancel),
+    SimplexImpl(const Problem& p, const SimplexOptions& opt, const CancellationToken* cancel,
+               const WarmStart* warm_start)
+        : problem_(p), opt_(opt), cancel_(cancel), warm_start_(warm_start),
           n_(p.num_cols()), m_(p.num_rows()), total_(p.num_cols() + p.num_rows()),
           csc_(p.matrix().to_csc()),
           factor_(p.num_rows()) {}
@@ -205,6 +206,8 @@ public:
 
 private:
     void setup();
+    void reset_to_slack_basis();
+    bool apply_warm_start();   ///< true if the guess was structurally usable
     void load_column(Idx j, std::vector<Real>& dense) const;
     Real column_dot(Idx j, const std::vector<Real>& y) const;
     void recompute_basic_values();
@@ -223,6 +226,7 @@ private:
     const Problem& problem_;
     SimplexOptions opt_;
     const CancellationToken* cancel_;
+    const WarmStart* warm_start_;
     Idx n_, m_, total_;
     CscMatrix csc_;
     BasisFactorization factor_;
@@ -332,6 +336,22 @@ void SimplexImpl::setup() {
         upper_[static_cast<std::size_t>(n_ + i)] = problem_.row_upper()[static_cast<std::size_t>(i)];
     }
 
+    reset_to_slack_basis();
+
+    scratch_column_.assign(static_cast<std::size_t>(m_), 0.0);
+    direction_.assign(static_cast<std::size_t>(m_), 0.0);
+    duals_.assign(static_cast<std::size_t>(m_), 0.0);
+    basic_costs_.assign(static_cast<std::size_t>(m_), 0.0);
+    phase1_cost_.assign(static_cast<std::size_t>(total_), 0.0);
+
+    // EXPAND starts at half the feasibility tolerance and is scheduled to reach
+    // the full tolerance by the next refactorization, then resets.
+    const int window = std::max(1, opt_.refactor_frequency);
+    expand_tol_ = 0.5 * opt_.primal_tolerance;
+    expand_rate_ = 0.5 * opt_.primal_tolerance / window;
+}
+
+void SimplexImpl::reset_to_slack_basis() {
     // Nonbasic variables start at a finite bound; a free variable starts at zero.
     for (Idx j = 0; j < total_; ++j) {
         const auto k = static_cast<std::size_t>(j);
@@ -347,25 +367,67 @@ void SimplexImpl::setup() {
         }
     }
 
-    // Starting basis: all logicals. Its basis matrix is -I, always nonsingular,
-    // which is the whole reason for the [A -I] formulation.
-    basis_.resize(static_cast<std::size_t>(m_));
+    // All logicals. Its basis matrix is -I, always nonsingular, which is the
+    // whole reason for the [A -I] formulation -- the guaranteed-safe fallback
+    // for both the cold-start case and a warm start (ticket #11) whose
+    // guessed basis turns out singular.
+    basis_.assign(static_cast<std::size_t>(m_), Idx{0});
+    std::fill(basis_position_.begin(), basis_position_.end(), Idx{-1});
     for (Idx i = 0; i < m_; ++i) {
         basis_[static_cast<std::size_t>(i)] = n_ + i;
         basis_position_[static_cast<std::size_t>(n_ + i)] = i;
     }
+}
 
-    scratch_column_.assign(static_cast<std::size_t>(m_), 0.0);
-    direction_.assign(static_cast<std::size_t>(m_), 0.0);
-    duals_.assign(static_cast<std::size_t>(m_), 0.0);
-    basic_costs_.assign(static_cast<std::size_t>(m_), 0.0);
-    phase1_cost_.assign(static_cast<std::size_t>(total_), 0.0);
+bool SimplexImpl::apply_warm_start() {
+    const WarmStart& ws = *warm_start_;
+    if (static_cast<Idx>(ws.basis.size()) != m_) return false;
+    if (static_cast<Idx>(ws.point.size()) != total_) return false;
 
-    // EXPAND starts at half the feasibility tolerance and is scheduled to reach
-    // the full tolerance by the next refactorization, then resets.
-    const int window = std::max(1, opt_.refactor_frequency);
-    expand_tol_ = 0.5 * opt_.primal_tolerance;
-    expand_rate_ = 0.5 * opt_.primal_tolerance / window;
+    std::vector<char> seen(static_cast<std::size_t>(total_), 0);
+    for (Idx idx : ws.basis) {
+        if (idx < 0 || idx >= total_) return false;
+        char& s = seen[static_cast<std::size_t>(idx)];
+        if (s) return false;             // a repeated index cannot be a basis
+        s = 1;
+    }
+
+    basis_ = ws.basis;
+    std::fill(basis_position_.begin(), basis_position_.end(), Idx{-1});
+    for (Idx i = 0; i < m_; ++i)
+        basis_position_[static_cast<std::size_t>(basis_[static_cast<std::size_t>(i)])] = i;
+
+    // Nonbasic variables: snap to whichever bound the guessed value sits
+    // closer to -- the same rule the main loop already uses when a variable
+    // leaves the basis (see the "snap the leaving variable" comment in
+    // iterate()). Wrong here costs pivots, not correctness: Phase I/II still
+    // run to a verified feasible-and-optimal point regardless of the guess.
+    for (Idx j = 0; j < total_; ++j) {
+        const auto k = static_cast<std::size_t>(j);
+        if (basis_position_[k] >= 0) continue;   // basic: recompute_basic_values() sets x_
+        const Real guess = ws.point[k];
+        const bool has_lo = is_finite_bound(lower_[k]);
+        const bool has_hi = is_finite_bound(upper_[k]);
+        if (has_lo && has_hi) {
+            if (std::abs(guess - lower_[k]) <= std::abs(guess - upper_[k])) {
+                state_[k] = NonbasicState::AtLower;
+                x_[k] = lower_[k];
+            } else {
+                state_[k] = NonbasicState::AtUpper;
+                x_[k] = upper_[k];
+            }
+        } else if (has_lo) {
+            state_[k] = NonbasicState::AtLower;
+            x_[k] = lower_[k];
+        } else if (has_hi) {
+            state_[k] = NonbasicState::AtUpper;
+            x_[k] = upper_[k];
+        } else {
+            state_[k] = NonbasicState::Free;
+            x_[k] = 0.0;
+        }
+    }
+    return true;
 }
 
 Status SimplexImpl::refactorize() {
@@ -846,10 +908,23 @@ SimplexResult SimplexImpl::run() {
     }
 
     setup();
+    const bool warm_started = (warm_start_ != nullptr) && apply_warm_start();
     if (refactorize() != Status::Ok) {
-        result_.status = SolveStatus::NumericalFailure;
-        result_.message = "the starting basis is singular, which should be impossible";
-        return result_;
+        if (warm_started) {
+            // The guessed basis (ticket #11) was singular -- fall back to the
+            // guaranteed-nonsingular slack basis rather than failing outright.
+            // A bad guess costs the pivots it would have saved, nothing more.
+            reset_to_slack_basis();
+            if (refactorize() != Status::Ok) {
+                result_.status = SolveStatus::NumericalFailure;
+                result_.message = "the starting basis is singular, which should be impossible";
+                return result_;
+            }
+        } else {
+            result_.status = SolveStatus::NumericalFailure;
+            result_.message = "the starting basis is singular, which should be impossible";
+            return result_;
+        }
     }
     recompute_basic_values();
 
@@ -977,11 +1052,12 @@ SimplexResult SimplexImpl::run() {
 
 }  // namespace
 
-SimplexResult Simplex::solve(const Problem& problem, const CancellationToken* cancel) {
+SimplexResult Simplex::solve(const Problem& problem, const CancellationToken* cancel,
+                             const WarmStart* warm_start) {
     std::string why;
     if (problem.validate(&why) != Status::Ok)
         throw Error("Simplex::solve was handed an invalid problem: " + why);
-    SimplexImpl impl(problem, options_, cancel);
+    SimplexImpl impl(problem, options_, cancel, warm_start);
     return impl.run();
 }
 

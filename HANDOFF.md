@@ -1211,3 +1211,163 @@ Nothing here assumes the three contestants are simplex/PDHG/IPM specifically.
   about GPU wall-clock, and a CPU simulation of PDHG's iteration is not
   that. Revisit once GPU access is available again.
 - `ctest`: 17/17. Sovereignty check clean.
+
+---
+
+## 21. Ticket #11 -- concurrent checkpoint crossover (Phase 3, M2)
+
+### 21.1 What was built
+
+```
+include/sovereign/crossover.hpp   CrossoverOptions, CrossoverResult, Crossover,
+                                   guess_basis_from_point, and a WarmStart addition
+                                   to simplex.hpp
+src/l1/crossover.cpp              the checkpoint harness
+tests/test_crossover.cpp          6 cases
+tests/test_simplex.cpp            +3 cases (WarmStart contract)
+tools/check_crossover_vs_oracle.py  oracle comparison at simplex-grade (exact) tolerance
+apps/sovereign_cli.cpp            `solve --engine crossover`
+```
+
+Two smaller, surgical additions this ticket needed elsewhere, both documented
+inline where they live:
+
+- **`Simplex::solve` gained an optional `WarmStart`** (simplex.hpp/.cpp): a
+  basis guess (`m` variable indices) plus a point (used only to decide which
+  bound a nonbasic guess starts at). `setup()` was split so the all-logical
+  basis construction is now `reset_to_slack_basis()`, callable standalone;
+  `apply_warm_start()` overwrites it from the guess and `run()` falls back to
+  `reset_to_slack_basis()` if the guessed basis turns out singular. Nothing
+  about a cold-start solve (`warm_start == nullptr`) changed -- every
+  existing ticket #4 test still exercises the exact same code path it always
+  did.
+- **`PdhgOptions` gained an optional `checkpoint` callback** (pdhg.hpp/.cpp):
+  invoked at the exact point the main loop already unscales a candidate
+  point to check convergence (every `restart_check_period` iterations), with
+  that same unscaled `(x, y)` and its original-space residual. The unscaling
+  this needed was already being done for the final result, so it was
+  factored into one `unscale_to_original()` helper used by both call sites
+  rather than duplicated.
+
+### 21.2 Why concurrent, not "PDHG then crossover"
+
+The ticket's own "Watch out" is direct: "classical crossover is essentially
+simplex again -- if you run it once, serially, after PDHG fully converges,
+you delete the GPU win." So `Crossover::solve` never waits for PDHG to
+finish. It launches PDHG on `backend` in its own thread with the checkpoint
+callback installed; every checkpoint PDHG reaches -- whether or not PDHG
+itself would call it converged -- spawns a fresh crossover attempt
+(`guess_basis_from_point` + a warm-started `Simplex::solve`) in its own
+thread, running concurrently with PDHG's continuing iteration and every
+earlier attempt. The first attempt to reach a status Simplex is actually
+entitled to assert (`Optimal`, `Infeasible`, or `Unbounded` -- Phase I/II are
+exact regardless of how good the guess was, so an infeasibility proof from a
+bad guess is just as trustworthy as one from a good one) wins: it cancels
+PDHG and every other in-flight attempt and the harness returns as soon as
+everything is joined. This is deliberately the same shape as ticket #10's
+`race_solve` (own `CancellationToken` per entrant, "first to a *valid*
+answer" wins, every thread joined before returning) -- ticket #11 is
+racing an unbounded, dynamically-growing set of entrants instead of three
+fixed ones, which is the one structural difference (`std::deque
+<CancellationToken>` for stable addresses across growth, since
+`CancellationToken` wraps a `std::atomic<bool>` and is neither copyable nor
+movable, so it cannot live in a `std::vector` that might reallocate).
+
+**Graceful degradation when nothing overlaps.** If no checkpoint ever fires
+before PDHG itself stops (tested explicitly: `restart_check_period` set
+larger than `max_iterations`), or every checkpoint attempt loses without
+producing a valid answer, the harness makes exactly one more attempt
+directly on PDHG's own final returned point before declaring failure --
+ordinary, non-concurrent crossover, exactly the degenerate case concurrency
+had nothing left to overlap with. `CrossoverResult::winning_checkpoint_
+iteration == -1` marks this path so a caller can tell it apart from a real
+concurrent win.
+
+### 21.3 Basis construction (`guess_basis_from_point`)
+
+For each of the `n + m` variables in the internal `[A -I]` indexing (ticket
+#4's own form -- structural columns then row logicals), compute its margin
+to the nearer of its own two bounds (`min(x - lo, hi - x)`; a variable with
+no finite bound at all gets `+infinity`, because it MUST be basic for its
+guessed value to be representable -- a nonbasic variable is pinned to a
+bound, and a nonbasic free variable is pinned to 0, silently discarding
+whatever value it actually had). The `m` variables with the largest margins
+(furthest from their own bounds -- i.e., the ones the interior point treats
+as truly interior) are guessed basic; everything else is nonbasic, snapped
+to whichever bound its guessed value sits closer to.
+
+This is a GUESS, not a proof, and the code never claims otherwise: `Simplex`
+verifies and corrects it exactly as it would a cold start (Phase I restores
+feasibility from whatever basis it is handed, Phase II then optimizes), and
+falls back to the slack basis if the guess is singular. A bad guess costs
+pivots; it cannot cost correctness -- this is what makes running dozens of
+concurrent guesses safe rather than dozens of chances to return a wrong
+answer.
+
+### 21.4 Verification
+
+- `test_simplex` -- 3 new cases: a correct warm-start basis reaches the same
+  hand-checked optimum as a cold start; a structurally invalid guess (basis
+  index out of range) is rejected by `apply_warm_start()` and falls back
+  cleanly; a warm start on an infeasible model still proves infeasibility
+  (the guess must never change what the solve is ALLOWED to conclude).
+- `test_crossover` -- 6 cases: `guess_basis_from_point` picks the right
+  basis on a hand-verified vertex; a feasible model reaches the exact
+  optimum (`1e-9`, not PDHG's `1e-4`) via a real concurrent checkpoint win
+  (`checkpoint_attempts > 0`); a degenerate small instance; an infeasible
+  model caught by a crossover attempt's own Simplex Phase I even though PDHG
+  itself has no infeasibility detection at all; the no-checkpoint-ever-fires
+  degenerate case falls back correctly (`winning_checkpoint_iteration ==
+  -1`); 10 repeated solves back to back as practical evidence of clean join
+  discipline, same precedent as ticket #10's own test.
+- **Clean under ThreadSanitizer**, 3 fresh runs, 0 warnings -- ticket #10's
+  own race harness caught a real data race this way (HANDOFF S20.2.1) and
+  this harness has the same shape (shared winner state, dynamically spawned
+  threads reporting into it), so the same check was run here rather than
+  trusted by inspection.
+- `check_crossover_vs_oracle.py` at **exact tolerance** (`1e-6`, the same
+  tight tolerance `check_simplex_vs_oracle.py` (#4) uses, deliberately not
+  PDHG's looser `5e-3`/`1e-3`): smoke set + 7 Netlib instances (`adlittle`,
+  `afiro`, `fit1d`, `fit2d`, `kb2`, `sc50a`, `sc50b`) all agree with the
+  oracle. `fit2d` (25 rows, 10500 columns -- the same instance
+  `check_pdhg_vs_oracle.py` already flags as PDHG's documented slow tail,
+  HANDOFF S18.2) needs a wider timeout than the default 30s to let a
+  checkpoint actually reach convergence; given 180s it converges and
+  matches the oracle exactly.
+- **Wall-clock, mechanically, on this machine's Host backend (not the GPU
+  claim -- see S9/S17.2/S20.3 for why no number here can be that claim
+  yet).** `fit1d`: crossover 207ms vs. plain simplex 515ms. `fit2d`:
+  crossover 12.7s vs. plain simplex 50.5s -- roughly 4x, and specifically on
+  the two instances wide/hard enough that simplex actually does a lot of
+  work, which is the shape of evidence the ticket's own "beat CPU wall-clock"
+  condition wants. On the small, easy instances (`afiro`, `sc50a`, `sc50b`,
+  `kb2`) plain simplex is faster in absolute terms -- expected and
+  unsurprising (concurrency overhead is not free, and simplex alone was
+  already solving those in single-digit milliseconds), and not the case the
+  ticket's own M2 pass condition is asking about.
+- `ctest`: 18/18. Sovereignty check clean (`check_crossover_vs_oracle.py`
+  added to the existing `highs` exception's `paths`, same pattern as the
+  other oracle-comparison scripts).
+
+### 21.5 M2 status and what is still open
+
+**M2's own pass condition** ("an exact vertex is produced from a GPU
+interior solution, and total time still beats CPU") is green on everything
+checkable without a GPU: exact vertices, concurrent checkpoint wins,
+clean cancellation under TSan, and a real (if Host-backend-only) wall-clock
+win on the two hardest instances tried. What is NOT yet demonstrated is the
+ticket's actual headline claim -- winning against CPU on a genuinely large
+GPU-scale instance, which needs a real device (same carried gap as M1's own
+close in S9/S17.2/S20.3).
+
+**Ticket #12 (spiral-axis vertex jump)** is the explicit stretch goal layered
+on top of this -- Build Map: "this is a moonshot layered on top... if it
+doesn't work, it's a clean roadmap line," and #11 (this ticket) is the
+committed fallback it must not be blocked by. Not started.
+
+**Not addressed here, tracked forward:** the checkpoint callback currently
+fires unconditionally at PDHG's existing restart-check cadence
+(`restart_check_period`), not at a schedule tuned for crossover's own cost
+(spawning `O(iterations / restart_check_period)` Simplex solves on a large
+instance is not free); a real GPU run is what will make that tuning
+question concrete rather than theoretical.

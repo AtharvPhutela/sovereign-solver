@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <span>
+#include <utility>
 
 #include "sovereign/scaling.hpp"
 
@@ -196,6 +198,21 @@ Real original_space_residual(const Problem& problem, Real obj_sign, const Scalin
     return std::max(primal_res, dual_res);
 }
 
+/// Unscales a (x, y) pair from PDHG's internal always-minimize, Ruiz/Pock-
+/// Chambolle-scaled space back to the problem's own units and sense. Shared
+/// by the ticket #11 checkpoint callback and the final result population so
+/// both report the same point the same way.
+std::pair<std::vector<Real>, std::vector<Real>> unscale_to_original(
+        Real obj_sign, const Scaling& scaling,
+        std::span<const Real> x_scaled, std::span<const Real> y_scaled) {
+    std::vector<Real> x(x_scaled.begin(), x_scaled.end());
+    scaling.unscale_primal(x);
+    std::vector<Real> y(y_scaled.begin(), y_scaled.end());
+    for (Real& v : y) v *= obj_sign;
+    scaling.unscale_dual(y);
+    return {std::move(x), std::move(y)};
+}
+
 }  // namespace
 
 PdhgResult Pdhg::solve(const Problem& problem, Backend& backend,
@@ -353,6 +370,16 @@ PdhgResult Pdhg::solve(const Problem& problem, Backend& backend,
             return result;
         }
 
+        // Ticket #11: hand this checkpoint's candidate to whoever wants to try
+        // crossing it over to an exact vertex, whether or not PDHG itself
+        // considers it converged. `unscale_to_original` is exactly the
+        // unscaling this function already does at the very end for the final
+        // result -- the checkpoint costs nothing beyond that one extra call.
+        if (options_.checkpoint) {
+            auto [cx, cy] = unscale_to_original(obj_sign, scaling, candidate_x, candidate_y);
+            options_.checkpoint(result.iterations, cx, cy, original_residual);
+        }
+
         if (original_residual < options_.tolerance) {
             best_x_scaled = candidate_x;
             best_y_scaled = candidate_y;
@@ -398,12 +425,7 @@ PdhgResult Pdhg::solve(const Problem& problem, Backend& backend,
     else if (result.status == PdhgStatus::NotSolved) result.status = PdhgStatus::IterationLimit;
 
     // -- unscale back to the ORIGINAL problem's units and sense -------------
-    std::vector<Real> x_original = best_x_scaled;
-    scaling.unscale_primal(x_original);
-
-    std::vector<Real> y_original = best_y_scaled;
-    for (Real& v : y_original) v *= obj_sign;
-    scaling.unscale_dual(y_original);
+    auto [x_original, y_original] = unscale_to_original(obj_sign, scaling, best_x_scaled, best_y_scaled);
 
     result.primal = x_original;
     result.dual = y_original;

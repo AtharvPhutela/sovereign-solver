@@ -29,6 +29,8 @@ add_library(sovereign_l0
   l1/ipm.cpp
   # Ticket #10 -- the concurrent engine race.
   l1/race.cpp
+  # Ticket #11 -- concurrent checkpoint crossover.
+  l1/crossover.cpp
 )
 
 # Ticket #10 needs real threads (std::thread, not just <thread>'s declarations).

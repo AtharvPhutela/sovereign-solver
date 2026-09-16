@@ -41,6 +41,9 @@ sovereign_add_test(test_ipm        test_ipm.cpp)
 # Ticket #10 -- the concurrent engine race.
 sovereign_add_test(test_race       test_race.cpp)
 
+# Ticket #11 -- concurrent checkpoint crossover.
+sovereign_add_test(test_crossover  test_crossover.cpp)
+
 # Interface parity. On a machine with no CUDA/ROCm toolkit the GPU backends are
 # never compiled, so a change to the Backend interface would leave them behind
 # silently. This is the part of their correctness checkable without a GPU.

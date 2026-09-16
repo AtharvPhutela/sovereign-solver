@@ -363,4 +363,68 @@ End
     CHECK_NEAR(r.objective, 1.5, kTol);     // not 1, which the integer optimum would be
 }
 
+// --------------------------------------------------------------------------
+// warm start (ticket #11: crossover's basis-guess entry point)
+// --------------------------------------------------------------------------
+
+TEST(simplex, a_correct_warm_start_basis_reaches_the_same_exact_optimum) {
+    // Same model as two_variable_optimum. The optimal basis there has x, y
+    // both basic (the binding constraint intersection); columns are indices
+    // 0, 1 in the internal [A -I] numbering, rows' logicals are 2, 3.
+    const char* text = R"(Maximize
+ obj: x + y
+Subject To
+ c1: x + 2 y <= 4
+ c2: 4 x + 2 y <= 12
+End
+)";
+    const ReadResult r = read_lp_string(text);
+    WarmStart ws;
+    ws.basis = {0, 1};                       // guess: x and y both basic
+    ws.point = {8.0 / 3.0, 2.0 / 3.0, 4.0, 12.0};   // x, y, row activities (both binding)
+
+    Simplex s;
+    const SimplexResult result = s.solve(r.problem, nullptr, &ws);
+    CHECK(result.status == SolveStatus::Optimal);
+    CHECK_NEAR(result.objective, 10.0 / 3.0, kTol);
+    CHECK_NEAR(result.primal[0], 8.0 / 3.0, 1e-7);
+    CHECK_NEAR(result.primal[1], 2.0 / 3.0, 1e-7);
+}
+
+TEST(simplex, a_structurally_bad_warm_start_falls_back_and_still_solves) {
+    // A basis guess with an out-of-range index is exactly the kind of bad
+    // guess a real crossover checkpoint could never construct deliberately,
+    // but this is the contract test: apply_warm_start() must reject it
+    // (returning false) rather than reading out of bounds, and the solve
+    // must fall back to the guaranteed-nonsingular slack basis and still
+    // reach the correct answer.
+    const char* text = "Minimize\n obj: x\nSubject To\n c1: x >= 2\nEnd\n";
+    const ReadResult r = read_lp_string(text);
+    WarmStart bad;
+    bad.basis = {5};                          // out of range: total_ = n + m = 2
+    bad.point = {2.0, 2.0};
+
+    Simplex s;
+    const SimplexResult result = s.solve(r.problem, nullptr, &bad);
+    CHECK(result.status == SolveStatus::Optimal);
+    CHECK_NEAR(result.objective, 2.0, kTol);
+}
+
+TEST(simplex, warm_start_on_an_infeasible_model_still_proves_infeasibility) {
+    // The guess must never change what the solve is ALLOWED to conclude --
+    // only how fast it gets there. Phase I from a warm-started basis still
+    // has to certify infeasibility exactly as it would from a cold start.
+    const char* text = "Minimize\n obj: x\nSubject To\n c1: x >= 2\n c2: x <= 1\nEnd\n";
+    const ReadResult r = read_lp_string(text);
+    WarmStart ws;
+    ws.basis = {0, 1};                          // guess x and c1's logical both basic
+    ws.point = {1.5, 1.5, 1.5};                 // a plausible-looking but infeasible guess
+
+
+
+    Simplex s;
+    const SimplexResult result = s.solve(r.problem, nullptr, &ws);
+    CHECK(result.status == SolveStatus::Infeasible);
+}
+
 TST_MAIN()

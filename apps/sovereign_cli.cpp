@@ -13,6 +13,7 @@
 #include <string>
 
 #include "sovereign/backend.hpp"
+#include "sovereign/crossover.hpp"
 #include "sovereign/io.hpp"
 #include "sovereign/ipm.hpp"
 #include "sovereign/pdhg.hpp"
@@ -33,7 +34,7 @@ int usage() {
         "options:\n"
         "  --json                   machine-readable output\n"
         "  --warnings               print reader warnings\n"
-        "  --engine simplex|pdhg|ipm|race  which solve engine to use (default simplex)\n"
+        "  --engine simplex|pdhg|ipm|race|crossover  which solve engine (default simplex)\n"
         "  --max-iterations N       iteration limit (simplex 1000000, pdhg 1000000, ipm 1500)\n"
         "  --time-limit S           time limit in seconds (race: shared budget per entrant)\n"
         "  --refactor N             simplex: refactorize every N pivots (default 100)\n"
@@ -310,6 +311,56 @@ int command_solve_race(const std::string& path, bool json, const sov::RaceOption
     return result.has_winner ? 0 : 1;
 }
 
+// Ticket #11 -- concurrent checkpoint crossover: PDHG runs on `backend`
+// (Host today; Cuda/Hip unchanged once a toolkit compiles them) while every
+// checkpoint it reaches launches a crossover attempt on the CPU concurrently;
+// the first attempt to reach an exact vertex wins and everything else is
+// cancelled. See crossover.hpp for the full design.
+int command_solve_crossover(const std::string& path, bool json, const sov::CrossoverOptions& opt) {
+    const sov::ReadResult r = sov::read_model(path);
+    auto backend = sov::make_backend(sov::default_backend_kind());
+
+    sov::Crossover crossover(opt);
+    const sov::CrossoverResult result = crossover.solve(r.problem, *backend);
+
+    if (json) {
+        std::printf("{\n");
+        std::printf("  \"path\": \"%s\",\n", escape(path).c_str());
+        std::printf("  \"engine\": \"crossover\",\n");
+        std::printf("  \"backend\": \"%s\",\n", sov::to_string(backend->kind()));
+        std::printf("  \"status\": \"%s\",\n", sov::to_string(result.status));
+        if (result.status == sov::CrossoverStatus::Optimal)
+            std::printf("  \"objective\": %.17g,\n", result.objective);
+        else
+            std::printf("  \"objective\": null,\n");
+        std::printf("  \"winning_checkpoint_iteration\": %lld,\n",
+                    static_cast<long long>(result.winning_checkpoint_iteration));
+        std::printf("  \"checkpoint_attempts\": %lld,\n",
+                    static_cast<long long>(result.checkpoint_attempts));
+        std::printf("  \"pdhg_seconds\": %.6f,\n", result.pdhg_seconds);
+        std::printf("  \"total_seconds\": %.6f,\n", result.total_seconds);
+        std::printf("  \"message\": \"%s\"\n", escape(result.message).c_str());
+        std::printf("}\n");
+    } else {
+        std::printf("%s\n", r.problem.summary().c_str());
+        std::printf("engine      : crossover (pdhg on %s + concurrent checkpoint crossover)\n",
+                    backend->device_description().data());
+        std::printf("status      : %s\n", sov::to_string(result.status));
+        if (result.status == sov::CrossoverStatus::Optimal)
+            std::printf("objective   : %.12g\n", result.objective);
+        std::printf("checkpoints : %lld attempted, winner from iteration %lld\n",
+                    static_cast<long long>(result.checkpoint_attempts),
+                    static_cast<long long>(result.winning_checkpoint_iteration));
+        std::printf("time        : %.3f s total (pdhg %.3f s)\n",
+                    result.total_seconds, result.pdhg_seconds);
+        if (!result.message.empty())
+            std::printf("note        : %s\n", result.message.c_str());
+    }
+    return result.status == sov::CrossoverStatus::Optimal
+        || result.status == sov::CrossoverStatus::Infeasible
+        || result.status == sov::CrossoverStatus::Unbounded ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -323,6 +374,7 @@ int main(int argc, char** argv) {
     sov::PdhgOptions pdhg_opt;
     sov::IpmOptions ipm_opt;
     sov::RaceOptions race_opt;
+    sov::CrossoverOptions crossover_opt;
 
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -355,16 +407,28 @@ int main(int argc, char** argv) {
         else path = a;
     }
     if (path.empty()) return usage();
-    if (engine != "simplex" && engine != "pdhg" && engine != "ipm" && engine != "race") {
-        std::fprintf(stderr, "unknown --engine '%s' (want simplex, pdhg, ipm, or race)\n", engine.c_str());
+    if (engine != "simplex" && engine != "pdhg" && engine != "ipm" && engine != "race"
+        && engine != "crossover") {
+        std::fprintf(stderr,
+                    "unknown --engine '%s' (want simplex, pdhg, ipm, race, or crossover)\n",
+                    engine.c_str());
         return usage();
     }
+
+    // Ticket #11: crossover reuses the pdhg/simplex options already parsed
+    // above -- --tolerance/--max-iterations/--time-limit/--verbose all apply
+    // to its internal PDHG exactly as they do to `--engine pdhg`.
+    crossover_opt.pdhg = pdhg_opt;
+    crossover_opt.crossover_simplex = opt;
+    crossover_opt.verbose = opt.verbose;
 
     try {
         if (command == "info") return command_info(path, json, warnings);
         if (command == "solve" && engine == "pdhg") return command_solve_pdhg(path, json, pdhg_opt);
         if (command == "solve" && engine == "ipm") return command_solve_ipm(path, json, ipm_opt);
         if (command == "solve" && engine == "race") return command_solve_race(path, json, race_opt);
+        if (command == "solve" && engine == "crossover")
+            return command_solve_crossover(path, json, crossover_opt);
         if (command == "solve") return command_solve(path, json, opt, scale);
     } catch (const std::exception& e) {
         if (json) std::printf("{\"error\": \"%s\"}\n", escape(e.what()).c_str());

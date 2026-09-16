@@ -115,6 +115,26 @@ struct SimplexResult {
     FarkasCertificate farkas;
 };
 
+// Ticket #11 (concurrent checkpoint crossover): a basis GUESS derived from an
+// interior-point (PDHG/IPM) iterate, letting Simplex start closer to the
+// optimal vertex than the all-logical slack basis. This is the "basis
+// construction" step of classical crossover -- everything after it is just
+// Simplex's own existing Phase I (dual push: restore primal feasibility from
+// the guess) and Phase II (primal push: reduce cost to optimal), unchanged.
+//
+// The guess does not need to be right. `basis` must list exactly num_rows
+// distinct indices in [0, num_cols+num_rows) (columns then row logicals, same
+// indexing as the internal [A -I] form); a bad guess costs pivots, never
+// correctness -- Simplex::solve falls back to the guaranteed-nonsingular
+// slack basis if the guessed one turns out singular, and Phase I/II verify
+// and correct the point exactly as they would from a cold start.
+struct WarmStart {
+    std::vector<Idx> basis;    ///< length num_rows
+    std::vector<Real> point;   ///< length num_cols + num_rows; guessed values,
+                               ///< used only to pick which bound a nonbasic
+                               ///< variable starts at.
+};
+
 class Simplex {
 public:
     explicit Simplex(SimplexOptions options = {}) : options_(options) {}
@@ -124,7 +144,10 @@ public:
     /// `cancel`, if given, is checked once per pivot (ticket #10's engine
     /// race) -- a set token returns SolveStatus::Cancelled promptly rather
     /// than continuing to pivot toward an answer nobody will read.
-    SimplexResult solve(const Problem& problem, const CancellationToken* cancel = nullptr);
+    /// `warm_start`, if given (ticket #11), seeds the initial basis from an
+    /// interior-point guess instead of the all-logical basis.
+    SimplexResult solve(const Problem& problem, const CancellationToken* cancel = nullptr,
+                        const WarmStart* warm_start = nullptr);
 
     const SimplexOptions& options() const noexcept { return options_; }
 
