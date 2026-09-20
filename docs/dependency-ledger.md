@@ -352,5 +352,5 @@ This ledger is **living**. The rules:
 
 ---
 
-*Companion documents: `Sovereign_Solver_Bible.md` (§1.2 for the sovereignty
-constraint) and `Sovereign_Solver_Build_Map.md` (ticket #1).*
+*Companion documents: `design.md` (§1.2 for the sovereignty
+constraint) and `build-map.md` (ticket #1).*

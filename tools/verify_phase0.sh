@@ -53,7 +53,7 @@ section "Ticket #1 -- Sovereignty Dependency Ledger"
 if run "$PY" "$ROOT/tools/sovereignty_check.py" --check-ledger; then
   ok "tree, submodules and vendored sources are clean; ledger covers the policy"
 else
-  no "sovereignty check failed -- see DEPENDENCY_LEDGER.md"
+  no "sovereignty check failed -- see docs/dependency-ledger.md"
 fi
 
 if run "$PY" "$ROOT/tools/sovereignty_check.py" --cmake-build-dir "$BUILD" --check-ledger; then
@@ -73,7 +73,9 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 mkdir -p "$TMP/probe"
-cp "$ROOT/sovereignty.toml" "$ROOT/DEPENDENCY_LEDGER.md" "$TMP/probe/"
+mkdir -p "$TMP/probe/docs"
+cp "$ROOT/sovereignty.toml" "$TMP/probe/"
+cp "$ROOT/docs/dependency-ledger.md" "$TMP/probe/docs/"
 printf 'find_package(SCIP REQUIRED)\ntarget_link_libraries(x PRIVATE -lcbc)\n' \
   > "$TMP/probe/CMakeLists.txt"
 if "$PY" "$ROOT/tools/sovereignty_check.py" --root "$TMP/probe" >/dev/null 2>&1; then

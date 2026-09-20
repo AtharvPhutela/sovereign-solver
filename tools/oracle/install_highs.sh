@@ -5,7 +5,7 @@
 # WHY THIS IS SOVEREIGNTY-COMPLIANT
 # --------------------------------
 # HiGHS is on the FORBIDDEN list in sovereignty.toml -- as a *library*. The
-# Oracle rule (Bible S1.2, Part VII; DEPENDENCY_LEDGER.md S4) permits an
+# Oracle rule (Bible S1.2, Part VII; docs/dependency-ledger.md S4) permits an
 # established solver as a *testing oracle* provided it is reached only as a
 # black-box CLI over files on disk: never linked, never imported, never on our
 # solver's link line.

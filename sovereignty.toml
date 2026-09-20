@@ -27,7 +27,7 @@ schema_version = 1
 ticket = "#1"
 gate = "M0"
 bible_ref = "SS1.2, Part VII"
-ledger = "DEPENDENCY_LEDGER.md"
+ledger = "docs/dependency-ledger.md"
 
 # ---------------------------------------------------------------------------
 # What gets scanned.
@@ -56,14 +56,10 @@ include_globs = [
 # policy, the checker, and its tests. Everything else is fair game.
 exclude_globs = [
   ".git/**",
-  "DEPENDENCY_LEDGER.md",
+  "docs/**",
   "sovereignty.toml",
   "tools/sovereignty_check.py",
   "tools/test_sovereignty_check.py",
-  "Sovereign_Solver_Bible.md",
-  "Sovereign_Solver_Build_Map.md",
-  "problemStatement.md",
-  "HANDOFF.md",
   "README.md",
   "build/**", "**/build/**",
   "**/__pycache__/**",

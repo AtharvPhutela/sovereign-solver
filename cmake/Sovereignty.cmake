@@ -44,7 +44,7 @@ if(SOVEREIGNTY_CHECK_AT_CONFIGURE)
     message(FATAL_ERROR
       "\n${_sov_output}${_sov_error}\n"
       "Sovereignty check failed at configure time (exit ${_sov_result}).\n"
-      "See DEPENDENCY_LEDGER.md.")
+      "See docs/dependency-ledger.md.")
   endif()
   message(STATUS "Sovereignty check: clean (configure-time pass)")
 endif()

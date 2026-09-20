@@ -1,6 +1,6 @@
 # Sovereign Solver — Detailed Build Map & Step-by-Step Implementation Guide (v1)
 
-**For anyone building the Sovereign Solver who has NOT read the full Bible.** This file is self-contained and ordered so each ticket can be built and tested on its own before moving to the next. The companion `Sovereign_Solver_Bible.md` has the deep "why" — read it if a ticket's rationale is unclear. Where a ticket cites a Bible section (e.g. §4.2A), that's where the reasoning lives.
+**For anyone building the Sovereign Solver who has NOT read the full Bible.** This file is self-contained and ordered so each ticket can be built and tested on its own before moving to the next. The companion `design.md` has the deep "why" — read it if a ticket's rationale is unclear. Where a ticket cites a Bible section (e.g. §4.2A), that's where the reasoning lives.
 
 **Build model:** long-horizon research build, not a fixed sprint. Progress is **milestone-gated**, not clock-gated: each milestone (M0–M9) has a single **benchmark pass condition** that must go green before the next milestone's dependent tickets are trusted. The gates map 1:1 onto the Bible's Part IX build sequence. Unlike a hackathon, there is no "demo-ready by hour 8" — the equivalent discipline here is **"never build on an unvalidated numerical layer,"** because a silent error in a lower ticket doesn't just look wrong on stage, it invalidates every benchmark number above it.
 
@@ -627,4 +627,4 @@ These aren't rejected ideas — they're real extensions carried in Bible Part XI
 
 ---
 
-*This build map is a companion to `Sovereign_Solver_Bible.md`. The Bible explains WHY; this map tells you WHAT to build, in WHAT order, how to test each piece, which track (GPU/CPU/host↔device) and milestone gate each belongs to, and what's genuinely future work. When a step and the Bible disagree, the Bible is the source of truth on intent — but follow this map's ticket order, track tags, gate assignments, and Test steps for execution. The Oracle rule and the Golden rule are the two that keep a numerical solver honest: build nothing on an unvalidated layer, and never accept "it returned a number" as a passing test.*
+*This build map is a companion to `design.md`. The Bible explains WHY; this map tells you WHAT to build, in WHAT order, how to test each piece, which track (GPU/CPU/host↔device) and milestone gate each belongs to, and what's genuinely future work. When a step and the Bible disagree, the Bible is the source of truth on intent — but follow this map's ticket order, track tags, gate assignments, and Test steps for execution. The Oracle rule and the Golden rule are the two that keep a numerical solver honest: build nothing on an unvalidated layer, and never accept "it returned a number" as a passing test.*

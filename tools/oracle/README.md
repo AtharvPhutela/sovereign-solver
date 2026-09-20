@@ -8,7 +8,7 @@ checked against (Oracle rule; Bible §1.2, Part VII).
 The default oracle is **HiGHS**, which is *forbidden as a library* in
 `sovereignty.toml`. That is not a contradiction: the ban is on **linking** it.
 Running its command-line executable as a subprocess over files on disk is the
-sanctioned use. See `DEPENDENCY_LEDGER.md` §5.5.
+sanctioned use. See `docs/dependency-ledger.md` §5.5.
 
 The boundary is enforced physically:
 

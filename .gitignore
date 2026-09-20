@@ -6,7 +6,7 @@ compile_commands.json
 
 # Out-of-tree benchmark oracle (tools/oracle/install_highs.sh builds HiGHS here).
 # Kept entirely outside version control and outside the sovereignty-scanned tree
-# -- see DEPENDENCY_LEDGER.md and sovereignty.toml exclude_globs.
+# -- see docs/dependency-ledger.md and sovereignty.toml exclude_globs.
 build-oracle/
 
 # Downloaded benchmark corpora (ticket #2). Only benchmarks/smoke/ is committed.
@@ -31,3 +31,6 @@ venv/
 # HiGHS CLI writes this in its CWD
 HiGHS.log
 build64/
+
+# Claude Code local settings
+.claude/

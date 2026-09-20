@@ -2,7 +2,7 @@
 #
 # This module adds convenience targets and registers the ticket #2 test suites
 # with CTest. It does NOT link anything -- the oracle is a subprocess tool
-# (Oracle rule; DEPENDENCY_LEDGER.md S5.5). The HiGHS CLI it drives is built
+# (Oracle rule; docs/dependency-ledger.md S5.5). The HiGHS CLI it drives is built
 # out-of-tree by tools/oracle/install_highs.sh into build-oracle/, a path the
 # sovereignty check and this project both ignore.
 

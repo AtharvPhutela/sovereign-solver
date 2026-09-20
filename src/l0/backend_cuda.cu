@@ -5,7 +5,7 @@
 // classified PERMITTED in sovereignty.toml: they are numerical primitives.
 // cuSPARSE multiplies a matrix by a vector; the primal-dual iteration wrapped
 // around it, the restarts, the preconditioning and the convergence theory are
-// ours (DEPENDENCY_LEDGER.md S5.2).
+// ours (docs/dependency-ledger.md S5.2).
 //
 // STATUS ON THIS MACHINE: unverified. The development host has no CUDA toolkit
 // and no driver stack, so this translation unit has never been compiled or
